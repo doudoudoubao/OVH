@@ -4,24 +4,33 @@ name: CI
 # 但在此之前它们从来不会自动跑 —— 全靠本地记得执行。
 # 而这个项目会真的花钱下单(addon 匹配错一档就是每月多付几十欧),
 # 也会自己替换自己的二进制,推个坏版本上去的代价不小。
-# 平时只手动触发。自动跑会在每次 push 时占用 Actions 额度,
-# 而发版一直是本地 build.sh + gh release 做的 —— 这个流水线只做检查,
-# 不构建产物、不上传、不碰 Release。
-# 想跑的时候去 GitHub 的 Actions 页点 "Run workflow"。
 #
-# 例外:打 v* tag 时自动跑一次。
+# 这里原本是「只手动触发」,理由写的是「自动跑会在每次 push 时占用 Actions 额度」。
+# 那个理由不成立:本仓库是**公开仓库**,而公开仓库用标准 runner(ubuntu-latest
+# 就是)的 Actions 时长是免费且无上限的 —— 计费只针对私有仓库和 larger runner。
+# 没有额度可省,于是「只手动」的实际效果就是「从来不跑」:frontend job 在干净
+# 检出上一直是必红的(routeTree.gen.ts 不入库,见该 job 的注释),
+# 这条流水线要是被人跑过哪怕一次,不可能没发现。
 #
-# v0.1.15 就是这么出的事 —— 发出去的二进制带着一个「点在线更新后进程直接消失、
-# 不重启」的缺陷,而复现它的 restartrace_test.go 是事后修的时候才补的。
-# tag push 一年也就十几次,这点额度换"发版当天能看到红灯"是划算的。
+# 所以改成 push 到 main / PR 自动跑。就算按私有仓库的免费额度折算,
+# 两个 job 一轮 5-7 分钟 × 每月 30 次 push ≈ 200 分钟,也只占 2000 分钟的 10%。
 #
-# 说清楚它不是闸门:产物是本地 build.sh 传上去的,这条流水线拦不住一次坏发布,
-# 只能在几分钟内告诉你该不该把它撤下来。真要变成闸门,得把发版本身搬进 CI。
+# 打 v* tag 时也跑一轮。但别把它当发版闸门:产物是本地 build.sh + gh release
+# 传上去的,而 gh release create 是建 tag 和发布同时完成 —— CI 被唤醒时
+# 产物已经公开了。它只能在几分钟内告诉你该不该撤,拦不住任何东西。
+# 真要变成闸门,得把发版本身搬进 CI。
+#
+# (v0.1.15 那个「点在线更新后进程直接消失」的缺陷,tag 触发其实也抓不到:
+#  复现它的 restartrace_test.go 是事后修的时候才新建的,打 tag 那天仓库里没有它。
+#  真正能防这类事故的是 push 触发 + 修 bug 时补测试 —— 后者作者本来就在做,
+#  缺的只是「补完之后每次 push 都自动验一遍它还成立」。)
 on:
-  workflow_dispatch:
   push:
+    branches: [main]
     tags:
       - "v*"
+  pull_request:
+  workflow_dispatch:
 
 jobs:
   backend:
@@ -101,6 +110,14 @@ jobs:
     # 这些用例真的去打 OVH 的公开目录/可用性接口,验证我们对三区差异的理解没过期
     # (比如美区 region 只接受 united_states)。OVH 侧抖动不该把 CI 弄红,
     # 所以单独成 job 且不阻塞 —— 但它变红时值得认真看一眼。
+    #
+    # 这个 job **不**跟着 push / PR 跑,只在手动触发和打 tag 时跑。
+    # 上面两个 job 是纯本地计算,跑多少次都只花 GitHub 的机器;这个不一样,
+    # 每跑一次都是真的去敲 OVH 的接口。跟着每次 push 跑有两个坏处:
+    # 一是往 OVH 的限流里送(而限流撞上了就是抢购窗口里查不到库存),
+    # 二是 OVH 一抖 CI 就红,那种噪音会让人开始无视 CI —— 作者原注释里
+    # 担心的就是这件事,只是该限流的是这个 job,不是整条流水线。
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
     continue-on-error: true
     defaults:
       run:
