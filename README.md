@@ -88,6 +88,13 @@ Windows 把产物名改成 `ovh-server.exe` 即可;交叉编译加 `GOOS=linux G
 
 > Release 页提供 Windows amd64 / Linux amd64 / Linux arm64 三个预编译产物,不想自己编译可以直接下。
 
+> **`npm run build` 的两步顺序是 `vite build && tsc -b --noEmit`,别对调。**
+> `web/src/routeTree.gen.ts` 由 `@tanstack/router-plugin` 在 vite 跑起来时生成,
+> 而它被 `.gitignore` 挡在版本库外 —— 干净检出上这个文件不存在,先跑 `tsc` 必然是
+> `error TS2307: Cannot find module './routeTree.gen'` 外加十几条级联错误。
+> 开发机上不会暴露:跑过一次 `npm run dev` 之后那个文件就一直躺在工作区里。
+> 类型检查放在后面不影响它当闸门 —— `tsc` 失败时 `npm run build` 照样非零退出。
+
 ### 方式 B:开发(前后端分开跑)
 
 ```bash

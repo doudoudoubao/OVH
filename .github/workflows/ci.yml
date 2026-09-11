@@ -83,9 +83,16 @@ jobs:
           cache: npm
           cache-dependency-path: web/package-lock.json
       - run: npm ci
-      - name: TypeScript 类型检查
-        run: npx tsc -b --noEmit
-      - name: 构建
+      # 顺序不能反过来。src/routeTree.gen.ts 是 @tanstack/router-plugin 在
+      # vite 跑起来时生成的,而且被 .gitignore 挡在版本库外 —— 干净检出上它不存在。
+      # 先跑 tsc 的话必然是
+      #   src/main.tsx: error TS2307: Cannot find module './routeTree.gen'
+      # 外加十几条由它级联出来的 "'/xxx' is not assignable to type 'undefined'"。
+      # 本地不会暴露:开发机上跑过一次 npm run dev,那个文件就一直躺在工作区里。
+      #
+      # npm run build 现在是 `vite build && tsc -b --noEmit`:vite 先生成路由树
+      # 并产出 server/web/,tsc 再把类型这道闸落下,build 失败仍然是非零退出。
+      - name: 构建（顺带生成 routeTree.gen.ts）+ TypeScript 类型检查
         run: npm run build
 
   live-api:
