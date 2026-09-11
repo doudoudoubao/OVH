@@ -59,6 +59,18 @@ const taskRefLen = 8
 // 手机上超过这个数就得一直划,而队列真有几十条时用控制台看更合适。
 const menuMaxRows = 8
 
+// allowCallbackRate 决定这次回调走哪个限流桶,并当场扣一次额度。
+//
+// 必须二选一。写成「先 allowed := AllowRate(key),是菜单再覆盖成 AllowNavRate」
+// 是不行的 —— 那样菜单点击照样把下单的额度扣掉了,拆两个桶等于白拆。
+// 抽成函数就是为了让这件事能被测试守住:它是那种读代码时完全看不出错的写法。
+func allowCallbackRate(action, rateKey string) bool {
+	if action == menuAction {
+		return telegram.AllowNavRate(rateKey)
+	}
+	return telegram.AllowRate(rateKey)
+}
+
 // menuCB 造菜单按钮的 callback_data。
 // extra 是可选的任务号前缀,只有取消类按钮用得到。
 func menuCB(key string, extra ...string) string {
@@ -242,7 +254,14 @@ func handleMenuCallback(state *app.State, mon *monitor.Monitor, cb map[string]in
 		toast = "已全部取消"
 		text, kb = cancelText(state, []string{"all"}), backKeyboard()
 	default:
-		return false
+		// 认不出的菜单键 = 旧版本留在聊天记录里的按钮(升级后 key 变了)。
+		// 这里必须应答并自己收尾:往下 return false 的话,外层会当成未知 action
+		// 直接 400 且**不调 answerCallbackQuery** —— 客户端上那颗按钮会一直转圈到超时,
+		// 用户看到的是"点了没反应",而这恰恰是 callback_data 超限时一模一样的症状,
+		// 排查时会被引到完全错误的方向。
+		state.Logger.Debug("认不出的菜单键(可能是升级前的旧按钮): "+key, "telegram")
+		telegram.AnswerCallback(state, cbID, "这个按钮是旧版本的，发 /menu 重新打开", true)
+		return true
 	}
 
 	telegram.AnswerCallback(state, cbID, toast, false)

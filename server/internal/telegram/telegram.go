@@ -417,10 +417,30 @@ func EditMessageText(state *app.State, chatID interface{}, messageID int64,
 	}
 	b, _ := io.ReadAll(io.LimitReader(resp.Body, MaxTelegramBodyBytes))
 	_ = json.Unmarshal(b, &r)
-	if !r.OK {
-		state.Logger.Debug("编辑消息被拒: "+r.Description, "telegram")
+	if r.OK {
+		return true
 	}
-	return r.OK
+	// "message is not modified" 必须当成功。
+	//
+	// 新正文和键盘跟当前完全一样时,Telegram 返回的是 ok:false 而不是 ok:true ——
+	// 而"完全一样"在菜单里太常见了:连点两下同一个按钮、或者打开一个静态页面
+	// (帮助、空队列)再点一次,就是这个结果。
+	// 把它当失败的话调用方会退回"发新消息",于是用户点第二下不是"什么都没发生",
+	// 而是整屏内容又发了一遍 —— 想清屏的动作反而把屏刷满了。
+	//
+	// 屏幕上已经是我们想要的样子,这就是成功。
+	if isNotModified(r.Description) {
+		return true
+	}
+	state.Logger.Debug("编辑消息被拒: "+r.Description, "telegram")
+	return false
+}
+
+// isNotModified 判断这次编辑失败是不是"内容本来就一样"。
+// 按子串匹配而不是全等:Telegram 的完整描述后面还跟着一长串解释,
+// 而且这段文案历史上变过措辞。
+func isNotModified(desc string) bool {
+	return strings.Contains(strings.ToLower(desc), "message is not modified")
 }
 
 // storedKeyboard 由 handlers 在回调里塞进来的原始键盘(来自 callback_query.message)。

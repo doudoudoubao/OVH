@@ -23,9 +23,20 @@ const (
 	UpdateIDRetentionDays = 7
 	// ButtonTTL 一键下单按钮有效期，与旧的 messageUUIDCacheTTL 保持一致
 	ButtonTTL = 24 * time.Hour
-	// RateLimitWindow / RateLimitMaxPerWindow 单 chat 的处理频率上限
+	// RateLimitWindow / RateLimitMaxPerWindow 单 chat 的处理频率上限。
+	// 这个数字是按「下单」定的 —— 真正花钱的动作,宁可紧一点。
 	RateLimitWindow       = 10 * time.Second
 	RateLimitMaxPerWindow = 8
+	// NavRateMaxPerWindow 菜单导航的上限,走单独一个桶。
+	//
+	// 为什么不共用上面那个:翻菜单连点六七下太正常了(总览 → 返回 → 队列 → 返回 …),
+	// 8 次/10 秒转眼就撞上,而用户看到的只是一句「操作过于频繁」,
+	// 完全不知道自己做错了什么。更糟的是共用一个桶时翻菜单会把下单的额度也吃掉 ——
+	// 补货那一刻按不动下单按钮,原因却是刚才翻了几页菜单。
+	//
+	// 导航是只读的(唯一的写是取消任务,方向安全:最坏少买不会多买),
+	// 放宽的代价只是多几次 Telegram API 调用。所以给它一个宽得多的桶,但仍然封顶。
+	NavRateMaxPerWindow = 30
 )
 
 // IsAuthorizedActor 判断这条 update 的发送者是否是配置里那个 chat。
@@ -111,9 +122,37 @@ type rateBucket struct {
 }
 
 var (
-	rateMu   sync.Mutex
-	rateByID = map[string]*rateBucket{}
+	rateMu sync.Mutex
+	// 两个独立的桶:动作(下单等)和导航(翻菜单)。分开的理由见 NavRateMaxPerWindow。
+	rateByID    = map[string]*rateBucket{}
+	navRateByID = map[string]*rateBucket{}
 )
+
+// allowIn 在指定的桶里做固定窗口限流。调用方必须已持有 rateMu。
+func allowIn(buckets map[string]*rateBucket, id string, max int) bool {
+	now := time.Now()
+	b, ok := buckets[id]
+	if !ok || now.Sub(b.windowStart) > RateLimitWindow {
+		buckets[id] = &rateBucket{windowStart: now, count: 1}
+		return true
+	}
+	if b.count >= max {
+		return false
+	}
+	b.count++
+	return true
+}
+
+// AllowNavRate 菜单导航的限流,和 AllowRate 各走各的桶 ——
+// 翻菜单不该消耗下单的额度,反过来也一样。
+func AllowNavRate(id string) bool {
+	if id == "" {
+		id = "unknown"
+	}
+	rateMu.Lock()
+	defer rateMu.Unlock()
+	return allowIn(navRateByID, id, NavRateMaxPerWindow)
+}
 
 // AllowRate 按 chat（取不到则 user）维度限流，返回是否放行。
 func AllowRate(id string) bool {

@@ -138,24 +138,30 @@ func handleTelegramCallback(state *app.State, mon *monitor.Monitor, u *updateCtx
 		return
 	}
 
-	// 5) 频率限制
-	rateKey := telegram.ChatIDString(chatID)
-	if rateKey == "" {
-		rateKey = telegram.ChatIDString(fromUser["id"])
-	}
-	if !telegram.AllowRate(rateKey) {
-		telegram.AnswerCallback(state, fmt.Sprintf("%v", cb["id"]), "操作过于频繁，请稍后再试", true)
-		u.JSON(http.StatusTooManyRequests, gin.H{"ok": false, "error": "rate_limited"})
-		return
-	}
-
+	// 先解 callback_data 再限流。
+	//
+	// 解析是纯计算、没有副作用,提到限流之前是安全的;而顺序必须是这样,
+	// 因为「用哪个限流桶」取决于 action —— 翻菜单和下单不该共用一个额度。
 	callbackObj, ok := decodeCallbackData(state, cbData)
 	if !ok {
 		u.JSON(http.StatusBadRequest, gin.H{"ok": false, "error": "Invalid callback data format"})
 		return
 	}
-
 	action := strOr(callbackObj, "a", "action")
+
+	// 5) 频率限制。菜单导航走单独的宽桶(见 telegram.NavRateMaxPerWindow):
+	// 8 次/10 秒是按下单定的,翻几页菜单就能撞上,而且会把下单的额度一起吃掉 ——
+	// 补货那一刻按不动下单按钮,原因却是刚才翻了菜单。
+	rateKey := telegram.ChatIDString(chatID)
+	if rateKey == "" {
+		rateKey = telegram.ChatIDString(fromUser["id"])
+	}
+	if !allowCallbackRate(action, rateKey) {
+		telegram.AnswerCallback(state, fmt.Sprintf("%v", cb["id"]), "操作过于频繁，请稍后再试", true)
+		u.JSON(http.StatusTooManyRequests, gin.H{"ok": false, "error": "rate_limited"})
+		return
+	}
+
 	// 按钮菜单。只读导航 + 取消任务,同样不经过下面那套一次性 claim ——
 	// 它不下单;唯一的写操作是取消,而取消的方向是安全的(最坏结果是少买)。
 	if action == menuAction {

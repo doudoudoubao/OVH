@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/ovh-buy/server/internal/telegram"
 	"github.com/ovh-buy/server/internal/types"
 )
 
@@ -164,6 +165,56 @@ func TestTaskButtonLabel(t *testing.T) {
 				t.Logf("注意标签里连字符较多，确认没把 uuid 显示出来：%q", got)
 			}
 		})
+	}
+}
+
+// 菜单点击不能消耗下单的限流额度。
+//
+// 回归的是一个写出来完全看不出错的 bug：
+//
+//	allowed := telegram.AllowRate(key)      // ← 这一行已经扣了下单额度
+//	if action == menuAction {
+//	    allowed = telegram.AllowNavRate(key) // ← 覆盖返回值，但扣已经发生了
+//	}
+//
+// 后果是翻几页菜单就把下单额度吃光，补货那一刻按不动下单按钮，
+// 而原因是刚才翻了菜单 —— 没人能把这两件事联系起来。
+//
+// 每个用例用独立的 chatID，避免依赖包外的桶重置。
+func TestMenuClicksDontDrainOrderBudget(t *testing.T) {
+	const chat = "menu-budget-test-chat"
+
+	// 把导航额度用满
+	for i := 0; i < telegram.NavRateMaxPerWindow; i++ {
+		if !allowCallbackRate(menuAction, chat) {
+			t.Fatalf("菜单第 %d 次点击就被限流，导航上限应该是 %d",
+				i+1, telegram.NavRateMaxPerWindow)
+		}
+	}
+	if allowCallbackRate(menuAction, chat) {
+		t.Error("导航超过上限后应该被限流")
+	}
+
+	// 关键断言：下单额度必须一点没少
+	for i := 0; i < telegram.RateLimitMaxPerWindow; i++ {
+		if !allowCallbackRate("add_to_queue", chat) {
+			t.Fatalf("翻菜单把下单额度吃掉了：下单第 %d 次就被限流（共翻了 %d 次菜单）",
+				i+1, telegram.NavRateMaxPerWindow)
+		}
+	}
+}
+
+// 非菜单的回调走原来那个紧的桶，不能因为这次改动被放宽
+func TestNonMenuCallbackUsesStrictBucket(t *testing.T) {
+	const chat = "strict-bucket-test-chat"
+	for i := 0; i < telegram.RateLimitMaxPerWindow; i++ {
+		if !allowCallbackRate("wf", chat) {
+			t.Fatalf("第 %d 次就被限流，下单/流程的上限应该是 %d",
+				i+1, telegram.RateLimitMaxPerWindow)
+		}
+	}
+	if allowCallbackRate("wf", chat) {
+		t.Error("非菜单回调超过上限后必须被限流 —— 这道闸是给花钱的动作用的，不能放宽")
 	}
 }
 
