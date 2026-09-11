@@ -375,6 +375,54 @@ func MarkButtonPressed(state *app.State, chatID interface{}, messageID int64, pr
 	resp.Body.Close()
 }
 
+// EditMessageText 就地改掉一条消息的正文和键盘。
+//
+// 为什么需要它:按钮菜单每按一次都发一条新消息的话,翻几层聊天记录就被刷满了,
+// 而用户真正想看的是"当前这一屏"。就地编辑让整个菜单始终只占一条消息。
+//
+// 编辑失败**不是**致命的:Telegram 对超过 48 小时的消息不允许编辑,
+// 内容完全没变时也会返回 message is not modified。两种都只记 Debug ——
+// 调用方随后可以自己决定要不要退回发新消息。返回值就是给它判断用的。
+func EditMessageText(state *app.State, chatID interface{}, messageID int64,
+	text string, replyMarkup map[string]interface{}) bool {
+	cfg := state.Config.Get()
+	if cfg.TgToken == "" || messageID <= 0 {
+		return false
+	}
+	payload := map[string]interface{}{
+		"chat_id":    chatID,
+		"message_id": messageID,
+		"text":       text,
+	}
+	if replyMarkup != nil {
+		payload["reply_markup"] = replyMarkup
+	}
+	body, _ := json.Marshal(payload)
+	client := &http.Client{Timeout: 10 * time.Second}
+	req, _ := http.NewRequest(http.MethodPost,
+		"https://api.telegram.org/bot"+cfg.TgToken+"/editMessageText",
+		bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := client.Do(req)
+	if err != nil {
+		state.Logger.Debug("编辑消息失败: "+scrub(err.Error()), "telegram")
+		return false
+	}
+	defer resp.Body.Close()
+	// 和 SendKeyboard 同一个理由:callback_data 超 64 字节时 Telegram 不报错,
+	// 按钮发出去就是点了没反应。非 ok 响应必须记下来,否则这种故障完全无声。
+	var r struct {
+		OK          bool   `json:"ok"`
+		Description string `json:"description"`
+	}
+	b, _ := io.ReadAll(io.LimitReader(resp.Body, MaxTelegramBodyBytes))
+	_ = json.Unmarshal(b, &r)
+	if !r.OK {
+		state.Logger.Debug("编辑消息被拒: "+r.Description, "telegram")
+	}
+	return r.OK
+}
+
 // storedKeyboard 由 handlers 在回调里塞进来的原始键盘(来自 callback_query.message)。
 // 用一个短生命周期的 map 传递,避免给 MarkButtonPressed 加一个巨大的参数。
 var (
@@ -433,6 +481,9 @@ func rebuildKeyboard(state *app.State, chatID interface{}, messageID int64, pres
 // 不用记、不用打字,在手机上尤其重要。
 // 这是让一个 bot 显得"有人管"最便宜的一件事,而以前一条都没注册过。
 var BotCommands = []map[string]string{
+	// menu 排第一:它是按钮面板的入口,点一下就能到达下面这些只读命令,
+	// 用户不必再记住它们各自叫什么
+	{"command": "menu", "description": "按钮菜单（状态 / 队列 / 订阅 / 取消）"},
 	{"command": "help", "description": "怎么用 / 下单格式"},
 	{"command": "watch", "description": "盯着补货就抢（/watch 型号 [机房] [x数量]）"},
 	{"command": "unwatch", "description": "不盯了（/unwatch 型号）"},

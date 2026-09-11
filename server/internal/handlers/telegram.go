@@ -156,6 +156,14 @@ func handleTelegramCallback(state *app.State, mon *monitor.Monitor, u *updateCtx
 	}
 
 	action := strOr(callbackObj, "a", "action")
+	// 按钮菜单。只读导航 + 取消任务,同样不经过下面那套一次性 claim ——
+	// 它不下单;唯一的写操作是取消,而取消的方向是安全的(最坏结果是少买)。
+	if action == menuAction {
+		if handleMenuCallback(state, mon, cb, callbackObj, chatID, int64(messageID)) {
+			u.JSON(http.StatusOK, gin.H{"ok": true, "handled": "menu"})
+			return
+		}
+	}
 	// /watch 的分步选择。它不花钱(只是建订阅),走自己的分支,
 	// 不经过下面那套一次性按钮的 claim 逻辑 —— 那套是给"按一次就下单"用的。
 	if action == "wf" {

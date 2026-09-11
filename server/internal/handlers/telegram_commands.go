@@ -44,7 +44,15 @@ func handleCommand(state *app.State, mon *monitor.Monitor, chatID interface{}, m
 	var reply string
 	switch cmd {
 	case "start", "help", "h", "?":
-		reply = helpText()
+		// 发按钮菜单,不再是一大段纯文本。
+		// /status /queue /subs /recent /accounts 全是无参数的只读查询,天生该是按钮 ——
+		// 以前用户得先记住有这些命令,而 /help 看完就忘,下次还得再发一次去翻。
+		// 打字下单的完整语法一个字没丢,在菜单的「❓ 怎么下单」里(helpText 原样保留)。
+		sendMainMenu(state, chatID, messageID)
+		return true
+	case "menu", "m":
+		sendMainMenu(state, chatID, messageID)
+		return true
 	case "status", "s":
 		reply = statusText(state, mon)
 	case "queue", "q":
