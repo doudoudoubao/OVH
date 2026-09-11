@@ -18,6 +18,41 @@ import (
 // 失败立即调 Stop() 自停监控。
 const tgRecheckInterval = 5 * time.Minute
 
+// maxOrdersPerTrigger 一次补货跳变最多下多少单(机房数 × quantity 的乘积上限)。
+//
+// 这是个纯粹的防脚滑护栏,不是业务限制:订阅里的 quantity 没有上限,
+// 而真正的单数还要乘上"本轮同时补货的机房数" —— 这个乘法在界面上看不见。
+// 抢购本身是花钱的动作,配 autoPay 时更是直接扣款,宁可截断并在日志里说清楚,
+// 也不要让一次误配置变成十几台机器。真想要更多就拆成多条订阅。
+const maxOrdersPerTrigger = 10
+
+// orderTask 一条待发的入队请求:某个机房的第 idx+1 台
+type orderTask struct {
+	dc  string
+	idx int // 当前机房下的第 idx+1 个,日志用
+}
+
+// buildOrderTasks 把「机房集合 × 每个机房要几台」摊平成任务列表,并截到 limit。
+//
+// 轮次在外、机房在内:排出来是 dc1#1, dc2#1, dc3#1, dc1#2, dc2#2 …
+// 这样按 limit 截尾巴天然就是按机房均分,而不是把末尾几个机房整个砍掉
+// (被砍掉的那几个可能恰好是用户最想要的)。
+func buildOrderTasks(dcs []string, quantity, limit int) []orderTask {
+	if quantity <= 0 || limit <= 0 || len(dcs) == 0 {
+		return nil
+	}
+	tasks := make([]orderTask, 0, limit)
+	for i := 0; i < quantity; i++ {
+		for _, dc := range dcs {
+			if len(tasks) >= limit {
+				return tasks
+			}
+			tasks = append(tasks, orderTask{dc: dc, idx: i})
+		}
+	}
+	return tasks
+}
+
 // checkNotifyOrStop 节流后体检通知通道,**全部**不可用才自停。
 //
 // 以前这里只看 Telegram,TG 一失效就停整个监控 —— 于是 bot 被封、token 过期、
@@ -248,6 +283,18 @@ func (m *Monitor) batchOrder(planCode string, configInfo map[string]interface{},
 		quantity = 0
 	}
 	totalOrders := len(targets) * quantity
+	// 总量封顶。订阅的 quantity 只校验了下限(<1 → 1),没有上限,而这里还要再乘
+	// "本轮同时补货的机房数" —— 一个机型在 5 个机房同时上架、quantity 填 3,
+	// 一次跳变就是 15 单。用户填 quantity 时想的是"每个机房买几台",
+	// 不是"乘上机房数之后一共几台",这个乘法没人在界面上看得见。
+	// 超了就按机房轮流截断(而不是砍掉末尾几个机房),让每个机房都还有机会。
+	if totalOrders > maxOrdersPerTrigger {
+		m.state.Logger.Warn(fmt.Sprintf(
+			"[monitor->order] %s 本轮 %d 个机房 × 数量 %d = %d 单,超过单次触发上限 %d,已截断 —— "+
+				"如果确实想要这么多,把订阅拆成多条或调低 quantity",
+			planCode, len(targets), quantity, totalOrders, maxOrdersPerTrigger), "monitor")
+		totalOrders = maxOrdersPerTrigger
+	}
 	m.state.Logger.Info(fmt.Sprintf("[monitor->order] 开始批量下单: %s, 配置数=1, 数据中心数=%d, 数量=%d, 总订单数=%d",
 		planCode, len(targets), quantity, totalOrders), "monitor")
 	m.state.Logger.Info("[monitor->order] 下单条件：仅对从无货变有货的情况下单（过滤掉持续有货的情况）", "monitor")
@@ -268,16 +315,11 @@ func (m *Monitor) batchOrder(planCode string, configInfo map[string]interface{},
 	// 把 N 个 DC × M 个数量打成一个任务列表后并发发出去。
 	// 调用的是本地 /api/queue/quick-order(只是入队,不真去 OVH),所以并发完全安全;
 	// 也不会冲击 OVH —— 真的下单在 ProcessQueueLoop 里按 concurrentBatchSize=10 节流跑。
-	type orderTask struct {
-		dc  string
-		idx int // 当前 DC 下的第 idx+1 个,日志用
-	}
-	tasks := make([]orderTask, 0, len(targets)*quantity)
+	dcs := make([]string, 0, len(targets))
 	for _, n := range targets {
-		for i := 0; i < quantity; i++ {
-			tasks = append(tasks, orderTask{dc: n.dc, idx: i})
-		}
+		dcs = append(dcs, n.dc)
 	}
+	tasks := buildOrderTasks(dcs, quantity, totalOrders)
 
 	var successCount, failCount int64
 	httpClient := &http.Client{Timeout: 30 * time.Second}

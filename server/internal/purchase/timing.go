@@ -26,7 +26,12 @@ type phase struct {
 }
 
 // timeline 按顺序累积各阶段耗时。
-// 不用加锁:PurchaseServer 是单 goroutine 顺序执行的。
+//
+// 不用加锁,但理由**不是**"PurchaseServer 是单 goroutine 顺序执行的" —— 它不是:
+// ProcessQueueLoop 按 concurrentBatchSize(10)并发跑 PurchaseServer。
+// 真正的理由是每次 PurchaseServer 自己 newTimeline() 一份,只在本 goroutine 里
+// mark / 读,从不共享。照着那句旧注释往这里加一个跨调用共享的字段,就是数据竞争。
+// 真正跨 goroutine 共享的是下面的 lastTimings,它靠 lastTimingMu 保护。
 type timeline struct {
 	start time.Time
 	last  time.Time

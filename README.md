@@ -26,7 +26,7 @@ Linux 上记得 `chmod +x`。想自己编译见[部署方式](#部署方式)。
 | 层 | 技术 |
 |---|---|
 | 前端 | Vite 5 + React 18 + TypeScript + TanStack Router + TanStack Query + shadcn-ui + Tailwind + recharts |
-| 后端 | Go 1.21+ + Gin + 官方 [go-ovh](https://github.com/ovh/go-ovh) SDK |
+| 后端 | Go 1.25+ + Gin + 官方 [go-ovh](https://github.com/ovh/go-ovh) SDK(`go.mod` 要求 `go 1.25.0`,低版本工具链会直接编译失败) |
 | 持久化 | SQLite(`modernc.org/sqlite` 纯 Go / `mattn/go-sqlite3` cgo 双 driver, build tag 自动选),凭据字段 AES-256-GCM 加密落盘 |
 | 通知 | Telegram Bot(长轮询,无需公网地址)+ 自定义 Webhook(钉钉 / 飞书 / Bark / 自建),多通道冗余 |
 | 部署 | 单二进制(前端 //go:embed 进 Go 二进制) 或前后端分开跑 |

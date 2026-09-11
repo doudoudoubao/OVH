@@ -31,6 +31,29 @@ import (
 	"github.com/ovh-buy/server/internal/updater"
 )
 
+// defaultAPIKey 没设 API_SECRET_KEY 时的兜底密钥,也是 .env.example 里的示例值。
+// 两处必须是同一个常量:靠它同时认出「没设」和「设了但没改」这两种情况。
+const defaultAPIKey = "123456"
+
+// resolveAPIKey 决定实际生效的 API 密钥,以及它是不是那个人尽皆知的默认值。
+//
+// 判定必须看**值**,不能只看"环境变量是不是空的"。
+// .env.example 里写死的就是 API_SECRET_KEY=123456,而 README 让用户
+// 「复制成 .env 改」—— 照做但漏改这一行时 raw 是 "123456" 而不是空串,
+// 只看空串的话,最可能真的在用默认密钥的那条路径恰好告警不到。
+// 配上 LISTEN_HOST 默认空(监听所有网卡),装完就是一台同网段任何人
+// 都能下单 / 重装 / 删机器的机器,而启动日志一个字都不提。
+//
+// 顺带 TrimSpace:`API_SECRET_KEY=123456 ` 这种尾随空格在 .env 里很常见,
+// 它既绕开了默认值告警,又是一把用户自己都不知道长什么样的密钥。
+func resolveAPIKey(raw string) (key string, isDefault bool) {
+	key = strings.TrimSpace(raw)
+	if key == "" {
+		return defaultAPIKey, true
+	}
+	return key, key == defaultAPIKey
+}
+
 func main() {
 	// envPath 就是 godotenv 读的那个文件。密钥自动生成时会追加到这里,
 	// 所以路径必须和 Load() 用的完全一致 —— 分叉了就会出现
@@ -95,12 +118,8 @@ func main() {
 	lg := logger.New(paths.LogFile("app.log.json"), console)
 	cfgStore := config.New(sqliteDB)
 	state := app.NewState(paths, cfgStore, lg, sqliteDB)
-	state.APIKey = os.Getenv("API_SECRET_KEY")
-	usingDefaultAPIKey := false
-	if state.APIKey == "" {
-		state.APIKey = "123456"
-		usingDefaultAPIKey = true
-	}
+	apiKey, usingDefaultAPIKey := resolveAPIKey(os.Getenv("API_SECRET_KEY"))
+	state.APIKey = apiKey
 	state.Port = os.Getenv("PORT")
 	if state.Port == "" {
 		state.Port = "19998"
@@ -541,7 +560,9 @@ func main() {
 	if !enableAuth {
 		console.Error("⚠️  API 密钥校验已关闭(ENABLE_API_KEY_AUTH=false):任何人都能调用全部接口,包括下单和重装。仅限本地调试")
 	} else if usingDefaultAPIKey {
-		console.Error("⚠️  正在使用默认 API 密钥 123456 —— 请立刻在 .env 里设置 API_SECRET_KEY")
+		console.Error("⚠️  正在使用默认 API 密钥 " + defaultAPIKey +
+			" —— 它明文写在仓库的 .env.example 里,等于没有密钥。请立刻在 " + envPath +
+			" 里把 API_SECRET_KEY 换掉(生成:openssl rand -base64 32)")
 		if host == "" {
 			console.Error("⚠️  并且监听所有网卡(LISTEN_HOST 为空):同网段任何人都能用默认密钥操作你的 OVH 账户")
 		}
