@@ -1,0 +1,106 @@
+name: Docker
+
+# 只在打 tag 时触发。
+#
+# 仓库里另一个 CI 是纯手动（workflow_dispatch）—— 那是刻意的，
+# 不想每次 push 都烧 Actions 额度。这个也遵守同样的原则：
+# tag 是明确的发布动作，一次发布跑一次，不是每次提交都跑。
+#
+# 注意：发布流程是本地 build.sh --release 创建 tag 和 Release。
+# 用个人 token 通过 API 创建 tag 会产生 push 事件，所以这个 workflow 会被触发。
+# 万一没触发（GitHub 对某些 token 创建的 tag 不派发事件），
+# 到 Actions 页面用 workflow_dispatch 手动跑一次，填那个 tag 即可。
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "要构建的 tag（例 v0.1.16）。留空则用当前分支 HEAD"
+        required: false
+        type: string
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # 推 ghcr.io 需要这个；用内置的 GITHUB_TOKEN，不必额外配 secret
+      packages: write
+
+    steps:
+      - name: 取出代码
+        uses: actions/checkout@v4
+        with:
+          # 手动触发且填了 tag 就构建那个 tag，否则构建触发这次的 ref
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: 核对 VERSION 与 tag 是否一致
+        # 版本号是通过 ldflags 注入二进制的，前端和自更新都读它。
+        # 和 tag 对不上的话，用户装了 v0.1.16 的镜像、界面上显示 0.1.15，
+        # 自更新还会以为有新版可更 —— 这种不一致很难查，不如在这里直接拦住。
+        run: |
+          set -euo pipefail
+          FILE_VERSION="$(tr -d '[:space:]' < VERSION)"
+          RAW_REF="${{ inputs.tag || github.ref_name }}"
+          TAG_VERSION="${RAW_REF#v}"
+          echo "VERSION 文件: $FILE_VERSION"
+          echo "tag:          $TAG_VERSION"
+          if [ "${{ github.event_name }}" = "push" ] && [ "$FILE_VERSION" != "$TAG_VERSION" ]; then
+            echo "::error::VERSION 文件是 $FILE_VERSION，但 tag 是 $TAG_VERSION —— 两者必须一致"
+            exit 1
+          fi
+
+      - name: 配置 QEMU
+        # 交叉编译本身由 Go 完成（CGO_ENABLED=0），不需要 QEMU 跑构建；
+        # 但 alpine 运行时层要拉对应架构的基础镜像，仍然需要 binfmt 支持。
+        uses: docker/setup-qemu-action@v3
+
+      - name: 配置 Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: 登录 GitHub 镜像仓库
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 生成镜像标签
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          # ghcr.io 的路径必须全小写，仓库名里有大写字母会直接被拒
+          images: ${{ env.REGISTRY }}/${{ github.repository }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+          labels: |
+            org.opencontainers.image.title=OVH 控制台
+            org.opencontainers.image.description=OVH 服务器抢购 / 监控 / 生命周期管理
+
+      - name: 构建并推送
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # 缓存存在 GitHub Actions 自己的缓存里，下一次构建前端依赖那层能直接命中
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: 输出拉取命令
+        run: |
+          echo "### 镜像已推送" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo '${{ steps.meta.outputs.tags }}' >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY

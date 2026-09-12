@@ -19,6 +19,8 @@ type accountRow struct {
 	IAM         string `db:"iam"`
 	IsDefault   int    `db:"is_default"`
 	CreatedAt   string `db:"created_at"`
+	ProxyURL    string `db:"proxy_url"`
+	Fingerprint string `db:"fingerprint"`
 }
 
 // rowToAccount 出库时解密三个凭据字段。
@@ -45,6 +47,9 @@ func rowToAccount(r accountRow) types.OVHAccount {
 		IAM:         r.IAM,
 		IsDefault:   r.IsDefault == 1,
 		CreatedAt:   r.CreatedAt,
+		// 代理串带凭据,和三个 API 密钥一样是加密存的
+		ProxyURL:    dec(r.ProxyURL),
+		Fingerprint: r.Fingerprint,
 	}
 }
 
@@ -65,6 +70,8 @@ func accountToRow(a types.OVHAccount) accountRow {
 		IAM:         a.IAM,
 		IsDefault:   bi,
 		CreatedAt:   a.CreatedAt,
+		ProxyURL:    secret.Encrypt(a.ProxyURL),
+		Fingerprint: a.Fingerprint,
 	}
 }
 
@@ -132,9 +139,9 @@ func (db *DB) UpsertAccount(a types.OVHAccount) error {
 	r := accountToRow(a)
 	_, err = tx.NamedExec(`
 		INSERT INTO ovh_accounts
-		(id, name, endpoint, zone, app_key, app_secret, consumer_key, iam, is_default, created_at)
+		(id, name, endpoint, zone, app_key, app_secret, consumer_key, iam, is_default, created_at, proxy_url, fingerprint)
 		VALUES
-		(:id, :name, :endpoint, :zone, :app_key, :app_secret, :consumer_key, :iam, :is_default, :created_at)
+		(:id, :name, :endpoint, :zone, :app_key, :app_secret, :consumer_key, :iam, :is_default, :created_at, :proxy_url, :fingerprint)
 		ON CONFLICT(id) DO UPDATE SET
 		  name         = excluded.name,
 		  endpoint     = excluded.endpoint,
@@ -143,7 +150,9 @@ func (db *DB) UpsertAccount(a types.OVHAccount) error {
 		  app_secret   = excluded.app_secret,
 		  consumer_key = excluded.consumer_key,
 		  iam          = excluded.iam,
-		  is_default   = excluded.is_default
+		  is_default   = excluded.is_default,
+		  proxy_url    = excluded.proxy_url,
+		  fingerprint  = excluded.fingerprint
 	`, r)
 	if err != nil {
 		return fmt.Errorf("upsert account %s: %w", a.ID, err)

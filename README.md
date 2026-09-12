@@ -21,6 +21,12 @@ OVH 独立服务器 / VPS / Eco 系列**抢购 + 监控 + 管理**控制台。
 前端已经用 `//go:embed` 嵌进二进制,跑起来直接开 `http://localhost:19998` 就是完整界面。
 Linux 上记得 `chmod +x`。想自己编译见[部署方式](#部署方式)。
 
+也提供 Docker 镜像(`linux/amd64` + `linux/arm64`):
+
+```bash
+docker pull ghcr.io/gokele/ovh:latest
+```
+
 ## 技术栈
 
 | 层 | 技术 |
@@ -64,7 +70,43 @@ Linux 上记得 `chmod +x`。想自己编译见[部署方式](#部署方式)。
 
 ## 部署方式
 
-### 方式 A:单二进制(推荐生产)
+### 方式 A:Docker(推荐)
+
+```bash
+# 拿一份 docker-compose.yml,改掉里面的 API_SECRET_KEY,然后:
+docker compose up -d
+
+# 更新
+docker compose pull && docker compose up -d
+```
+
+或者直接 run:
+
+```bash
+docker run -d --name ovh-console \
+  -p 127.0.0.1:20000:20000 \
+  -v "$PWD/data:/data" \
+  -e API_SECRET_KEY=换成你自己的随机串 \
+  --restart unless-stopped \
+  ghcr.io/gokele/ovh:latest
+```
+
+镜像由打 tag 时的 GitHub Action 构建并推到 `ghcr.io/gokele/ovh`,提供 `linux/amd64` 与 `linux/arm64`。
+
+**数据全在 `/data` 这一个目录下**:SQLite 数据库、**数据库加密密钥**(`.env`)、缓存、日志。备份就备份这个目录。
+
+> ⚠️ 删了这个目录 = 已保存的 OVH 凭据和 Telegram Token 再也解不开。
+> 加密密钥默认自动生成并写进 `/data/.env`,跟着卷走;也可以用 `OVH_DB_KEY` 显式提供(迁移、k8s secret 时更可控)。
+
+首次启动时容器会把 `/data` 的归属改成 `PUID:PGID`(默认 10001)。
+bind mount 进来的宿主目录归属是宿主机那边的 uid,不处理的话容器里的非 root 用户写不进去,程序根本起不来。
+想和宿主机当前用户对齐就传 `PUID`/`PGID`,或者直接 `docker run --user $(id -u):$(id -g)`(那样容器不做归属处理,写权限由你保证)。
+
+**容器里自更新是停用的。** 新二进制只会写进容器的可写层,容器一重建
+(`compose up -d`、重启策略拉起、宿主机重启)就回到镜像里的旧版本 ——
+你会看到「更新成功」之后版本号又变回去。界面上会显示「有新版 + 请用 docker pull 更新」而不是更新按钮。
+
+### 方式 B:单二进制
 
 前端 build → Vite 输出到 `server/web/` → Go `-tags ui` 触发 `//go:embed` 把整目录嵌入二进制 → 单文件部署、双击即用。
 
@@ -88,14 +130,14 @@ Windows 把产物名改成 `ovh-server.exe` 即可;交叉编译加 `GOOS=linux G
 
 > Release 页提供 Windows amd64 / Linux amd64 / Linux arm64 三个预编译产物,不想自己编译可以直接下。
 
-> **`npm run build` 的两步顺序是 `vite build && tsc -b --noEmit`,别对调。**
+> **`npm run build` 的两步顺序是 `vite build && tsc -b`,别对调。**
 > `web/src/routeTree.gen.ts` 由 `@tanstack/router-plugin` 在 vite 跑起来时生成,
 > 而它被 `.gitignore` 挡在版本库外 —— 干净检出上这个文件不存在,先跑 `tsc` 必然是
 > `error TS2307: Cannot find module './routeTree.gen'` 外加十几条级联错误。
 > 开发机上不会暴露:跑过一次 `npm run dev` 之后那个文件就一直躺在工作区里。
 > 类型检查放在后面不影响它当闸门 —— `tsc` 失败时 `npm run build` 照样非零退出。
 
-### 方式 B:开发(前后端分开跑)
+### 方式 C:开发(前后端分开跑)
 
 ```bash
 # 后端

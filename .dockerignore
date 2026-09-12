@@ -1,0 +1,33 @@
+# 构建上下文里只需要 web/、server/、VERSION。
+# 其余一律排除 —— 尤其是那些**绝对不能进镜像**的：
+# .env 带着数据库加密密钥，sniper.db 是加密后的凭据本体，
+# 两者一起进镜像等于加密白做。
+
+.git
+.github
+dist
+*.md
+!README.md
+
+# 敏感文件（和 .gitignore / build.sh 的安全自检同一口径）
+.env
+.env.*
+**/.env
+**/.env.*
+**/.dbkey
+*.db
+*.db-*
+**/sniper.db*
+**/data/
+**/logs/
+*.log
+
+# 构建产物与依赖：镜像里会重新构建，带进去只会让上下文变大、缓存失效
+web/node_modules
+web/dist
+web/dist-ssr
+web/.tanstack
+web/*.tsbuildinfo
+server/web
+server/ovh-server*
+build.sh

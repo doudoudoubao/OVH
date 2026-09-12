@@ -204,10 +204,13 @@ func pickOSStatus(dc map[string]interface{}, linux, windows bool) string {
 // CheckVPSDCAvailability 查某机型在某子公司的各机房库存。
 // osFilter 非空时作为 os query 参数带给 OVH(订阅里选的安装系统)。
 func CheckVPSDCAvailability(state *app.State, planCode, ovhSubsidiary string) (map[string]interface{}, error) {
-	return checkVPSDCAvailabilityOS(state, planCode, ovhSubsidiary, "")
+	return checkVPSDCAvailabilityOS(state, planCode, ovhSubsidiary, "", "")
 }
 
-func checkVPSDCAvailabilityOS(state *app.State, planCode, ovhSubsidiary, osFilter string) (map[string]interface{}, error) {
+// accountID 决定这次查询从哪个出口发出去。
+// VPS 的可用性轮询是每轮都打的高频路径 —— 不跟着账户的代理走的话,
+// 即便每个账户都配了代理,这些请求仍然从本机真实 IP 发出,出口隔离漏了一半。
+func checkVPSDCAvailabilityOS(state *app.State, planCode, ovhSubsidiary, osFilter, accountID string) (map[string]interface{}, error) {
 	sub := NormalizeSubsidiary(ovhSubsidiary)
 	planCode = strings.TrimSpace(planCode)
 	if sub == "" {
@@ -241,7 +244,12 @@ func checkVPSDCAvailabilityOS(state *app.State, planCode, ovhSubsidiary, osFilte
 
 	req, _ := http.NewRequest(http.MethodGet, fullURL, nil)
 	req.Header.Set("accept", "application/json")
-	client := &http.Client{Timeout: 10 * time.Second}
+	client, cerr := state.HTTPClientFor(accountID, 10*time.Second)
+	if cerr != nil {
+		// 配了代理却建不出来 —— 不退回直连。退回的表现是一切正常、
+		// 隔离却已经没了,而用户无从察觉。
+		return nil, &CheckError{Msg: "出站代理配置有问题: " + cerr.Error(), Retryable: false}
+	}
 	resp, err := client.Do(req)
 	if err != nil {
 		// 网络抖动:下一轮还有机会
@@ -475,7 +483,7 @@ func monitorLoopGen(state *app.State, gen int64) {
 				if ovhSub == "" {
 					ovhSub = DefaultSubsidiary(state, sub.AutoOrderAccountID)
 				}
-				currentData, err := checkVPSDCAvailabilityOS(state, sub.PlanCode, ovhSub, sub.OS)
+				currentData, err := checkVPSDCAvailabilityOS(state, sub.PlanCode, ovhSub, sub.OS, sub.AutoOrderAccountID)
 				if err != nil {
 					logCheckFailure(state, sub.ID, sub.PlanCode, ovhSub, err)
 					continue

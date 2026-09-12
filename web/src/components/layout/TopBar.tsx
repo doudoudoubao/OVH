@@ -1,6 +1,7 @@
 import { Link, useRouterState } from "@tanstack/react-router";
 import { ChevronRight } from "lucide-react";
 import { MobileMenu } from "./MobileMenu";
+import { AccountSwitcher } from "@/components/layout/AccountSwitcher";
 
 /**
  * 顶部 56px 细 bar：只显示面包屑。⌘K 命令面板入口已移除，
@@ -29,9 +30,21 @@ export function TopBar() {
     { group: "", label: "" };
 
   return (
-    <header className="sticky top-0 z-30 h-14 flex items-center gap-2 px-3 sm:px-8 bg-background/95 backdrop-blur-sm border-b border-border">
+    <header className="sticky top-0 z-30 h-12 sm:h-14 flex items-center gap-2 px-3 sm:px-8 bg-background/95 backdrop-blur-sm border-b border-border">
       <MobileMenu />
-      <div className="flex items-center gap-2.5 min-w-0">
+      {/* 手机端顶栏:左边页名,右边账户 chip。
+          页名放这儿之后 PageHeader 里那个标题就是重复的,已经在手机端隐掉。
+          账户切换器必须常驻:三区(EU/US/CA)目录互不相通,切错账户后面每一步
+          都打在错误的站点上 —— 而它原来只在侧栏里,手机端侧栏隐藏、汉堡又收给了
+          平板,不挪上来的话手机上根本切不了。放右边是因为它是全局控制,
+          跟"当前在哪一页"不是一类东西。 */}
+      <span className="sm:hidden text-[15px] font-semibold text-foreground truncate">
+        {meta.label}
+      </span>
+      <div className="sm:hidden ml-auto flex-shrink-0 max-w-[52%]">
+        <AccountSwitcher compact />
+      </div>
+      <div className="hidden sm:flex items-center gap-2.5 min-w-0">
         <Link to="/" className="text-sm text-muted-foreground hover:text-foreground transition-colors whitespace-nowrap">
           首页
         </Link>

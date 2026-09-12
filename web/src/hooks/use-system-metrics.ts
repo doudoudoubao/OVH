@@ -24,6 +24,11 @@ export interface UpdateCheck {
   body: string;
   prerelease: boolean;
   checkedAt: string;
+  /** 跑在容器里。自更新在容器里是停用的 —— 新二进制只会写进容器的可写层，
+   *  容器一重建就回到镜像里的旧版本。界面据此显示「怎么拉新镜像」而不是更新按钮。 */
+  inContainer?: boolean;
+  /** 容器里的更新指引（多行文本）。inContainer 为 false 时是空串。 */
+  updateHint?: string;
 }
 
 /** 检查上游 (gokele/ovh) 是否有新版本。

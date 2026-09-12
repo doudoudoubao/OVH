@@ -95,6 +95,24 @@ export function UpdateButton({ check }: { check?: UpdateCheck }) {
   // 没有新版本就不显示任何东西
   if (!check?.hasUpdate && !started && !waitingRestart && !failed) return null;
 
+  // 容器里不给更新按钮 —— 点了必然被后端拒。
+  //
+  // 容器里的自更新是错的：新二进制只会写进容器的可写层，容器一重建
+  // （compose up -d、重启策略拉起、宿主机重启）就回到镜像里的旧版本，
+  // 用户会看到「更新成功」之后版本号又变回去。
+  // 所以这里显示的是"有新版 + 怎么拉新镜像"，而不是一个坏按钮。
+  if (check?.inContainer) {
+    return (
+      <span
+        className="inline-flex items-center gap-1.5 text-[11px] text-primary cursor-help"
+        title={check.updateHint || "容器里请用 docker compose pull && docker compose up -d 更新"}
+      >
+        <Sparkles className="w-3 h-3" />
+        有新版 v{check.latest} · 容器请用 docker pull 更新
+      </span>
+    );
+  }
+
   if (waitingRestart) {
     return (
       <span className="inline-flex items-center gap-1.5 text-[11px] text-primary">

@@ -4,8 +4,6 @@ import (
 	"fmt"
 	"sort"
 	"strings"
-	"sync"
-	"time"
 
 	"github.com/google/uuid"
 
@@ -189,7 +187,7 @@ func ProcessOrder(state *app.State, accountID, planCode, datacenter string, quan
 					Status:        "running",
 					CreatedAt:     now,
 					UpdatedAt:     now,
-					RetryInterval: 30,
+					RetryInterval: state.Config.RetryInterval(),
 					RetryCount:    0,
 					LastCheckTime: 0,
 					FromTelegram:  true,
@@ -201,40 +199,26 @@ func ProcessOrder(state *app.State, accountID, planCode, datacenter string, quan
 		}
 	}
 
-	batchSize := 10
-	totalBatches := (len(ordersToCreate) + batchSize - 1) / batchSize
-	state.Logger.Info(fmt.Sprintf("开始并发创建订单: 总数=%d, 批次大小=%d, 总批次数=%d",
-		len(ordersToCreate), batchSize, totalBatches), "telegram")
-	created := 0
-	var mu sync.Mutex
-	for batchIdx := 0; batchIdx < totalBatches; batchIdx++ {
-		start := batchIdx * batchSize
-		end := start + batchSize
-		if end > len(ordersToCreate) {
-			end = len(ordersToCreate)
-		}
-		batch := ordersToCreate[start:end]
-		var wg sync.WaitGroup
-		for _, item := range batch {
-			wg.Add(1)
-			go func(it types.QueueItem) {
-				defer wg.Done()
-				state.QueueMu.Lock()
-				state.Queue = append(state.Queue, it)
-				state.QueueMu.Unlock()
-				mu.Lock()
-				created++
-				mu.Unlock()
-			}(item)
-		}
-		wg.Wait()
-		state.Logger.Info(fmt.Sprintf("批次 %d/%d 完成: 本批次创建 %d 个订单", batchIdx+1, totalBatches, len(batch)), "telegram")
-	}
+	// 一次加锁批量入队。
+	//
+	// 以前这里是"分批 + 每项一个 goroutine",但每个 goroutine 的全部工作就是
+	// QueueMu.Lock() → append → Unlock():所有并发路径抢的是同一把锁,实际完全串行,
+	// 只是白付了调度和 WaitGroup 的开销。入队是纯内存操作,一次锁全部 append 才是对的。
+	created := len(ordersToCreate)
 	if created > 0 {
-		_ = state.SaveQueue()
-		state.Logger.Info(fmt.Sprintf("并发创建订单完成: 共创建 %d/%d 个订单", created, totalOrders), "telegram")
+		// 入队 + 落库是一件事:失败时 EnqueueItems 会把这批整体撤回,
+		// 不留"这次能跑但重启就丢"的半成功任务 —— 那种状态看起来完全正常
+		if err := state.EnqueueItems(ordersToCreate, false); err != nil {
+			state.Logger.Error("Telegram 下单后保存队列失败,已撤回: "+err.Error(), "telegram")
+			return OrderResult{
+				Success:     false,
+				TotalOrders: totalOrders,
+				Message: fmt.Sprintf("❌ 任务没能写进数据库，已全部撤回（避免出现重启就消失的假任务）：%s",
+					err.Error()),
+			}
+		}
+		state.Logger.Info(fmt.Sprintf("已创建 %d/%d 个订单", created, totalOrders), "telegram")
 	}
-	_ = time.Second
 	return OrderResult{
 		Success:       true,
 		Message:       fmt.Sprintf("已创建 %d/%d 个订单(账户 %s)", created, totalOrders, accLabel),

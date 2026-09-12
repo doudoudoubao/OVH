@@ -123,6 +123,18 @@ func (db *DB) migrate() error {
 	if err := db.addColumnIfMissing("vps_subscriptions", "auto_order_account_id", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return err
 	}
+	// ovh_accounts 的按账户出站配置:代理地址 + 指纹。
+	// ListAccounts 用的是显式列名 + sqlx 严格映射,只加结构体字段不加列
+	// 会让整个账户列表报 missing destination name —— 两者必须同一次上线。
+	// proxy_url 带凭据,和三个 API 密钥一样是加密后的密文。
+	for _, c := range [][2]string{
+		{"proxy_url", "TEXT NOT NULL DEFAULT ''"},
+		{"fingerprint", "TEXT NOT NULL DEFAULT ''"},
+	} {
+		if err := db.addColumnIfMissing("ovh_accounts", c[0], c[1]); err != nil {
+			return err
+		}
+	}
 	// telegram_order_buttons.account_id:一键下单按钮记住"该下到哪个账户"。
 	// 老库建表时没有这一列,而 ClaimTelegramButton / GetTelegramButton 是显式列名 SELECT +
 	// sqlx 严格映射,只加结构体字段不加列会让所有按钮回调直接 500,两者必须同一次上线。

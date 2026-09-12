@@ -10,6 +10,7 @@ import (
 
 	"github.com/ovh-buy/server/internal/app"
 	"github.com/ovh-buy/server/internal/monitor"
+	"github.com/ovh-buy/server/internal/netfp"
 	"github.com/ovh-buy/server/internal/ovh"
 	"github.com/ovh-buy/server/internal/types"
 )
@@ -26,6 +27,14 @@ type accountInput struct {
 	ConsumerKey string `json:"consumerKey"`
 	IAM         string `json:"iam"` // 可空,会自动生成 go-ovh-<zone>
 	SetDefault  bool   `json:"setDefault"`
+
+	// ProxyURL / Fingerprint 用指针,为了把"没传"和"传了空串"分开。
+	//
+	// 别的字段用"空 = 保留原值"的约定,但那样代理就**永远清不掉** ——
+	// 用户想从"走代理"改回"直连",发空串会被当成没传。
+	// nil = 不改，"" = 清掉（改回直连），非空 = 换成这个。
+	ProxyURL    *string `json:"proxyUrl"`
+	Fingerprint *string `json:"fingerprint"`
 }
 
 // endpointForZone 根据 zone 推 endpoint。
@@ -90,6 +99,18 @@ func (in *accountInput) validate() string {
 	if in.Name == "" {
 		return "缺少 name"
 	}
+	if in.ProxyURL != nil {
+		if err := netfp.ValidateProxyURL(*in.ProxyURL); err != nil {
+			// 在保存这一刻挡下来:放过去的话,用户要等到真有货那一刻才发现
+			// 出口不对,而那正是唯一不能出错的时刻。
+			return "代理地址不合法: " + err.Error()
+		}
+	}
+	if in.Fingerprint != nil {
+		if _, warn := netfp.LookupProfile(*in.Fingerprint); warn != "" {
+			return warn
+		}
+	}
 	if in.AppKey == "" || in.AppSecret == "" || in.ConsumerKey == "" {
 		return "缺少 OVH 凭据 (appKey / appSecret / consumerKey)"
 	}
@@ -126,6 +147,9 @@ func sanitizeAccount(a types.OVHAccount) types.OVHAccount {
 	a.AppKey = maskCred(a.AppKey)
 	a.AppSecret = maskCred(a.AppSecret)
 	a.ConsumerKey = maskCred(a.ConsumerKey)
+	// 代理串里常带 user:pass,和三个密钥同等对待 —— 只回显打过码的,
+	// 但保留主机和端口,否则用户没法确认自己配的是哪个出口。
+	a.ProxyURL = netfp.ScrubProxyURL(a.ProxyURL)
 	return a
 }
 
@@ -203,11 +227,18 @@ func CreateAccount(state *app.State) gin.HandlerFunc {
 			IsDefault:   isDefault,
 			CreatedAt:   types.NowISO(),
 		}
+		if in.ProxyURL != nil {
+			acc.ProxyURL = strings.TrimSpace(*in.ProxyURL)
+		}
+		if in.Fingerprint != nil {
+			acc.Fingerprint = strings.TrimSpace(*in.Fingerprint)
+		}
 		if err := state.DB.UpsertAccount(acc); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
 		_ = state.ReloadAccounts()
+		RefreshSharedProxy(state)
 
 		// 用新凭据验证
 		valid, subsidiaryWarning := verifyAccountCreds(state, acc.ID)
@@ -249,6 +280,15 @@ func UpdateAccount(state *app.State) gin.HandlerFunc {
 		acc := existing
 		if in.Name != "" {
 			acc.Name = in.Name
+		}
+		// 代理 / 指纹用指针判"传没传":nil = 不改，"" = 改回直连。
+		// 改完下面会 Invalidate + ReloadAccounts,已缓存的 client 会带着
+		// 新的出站配置重建 —— 中途换代理、或者从直连改成走代理,都能立刻生效。
+		if in.ProxyURL != nil {
+			acc.ProxyURL = strings.TrimSpace(*in.ProxyURL)
+		}
+		if in.Fingerprint != nil {
+			acc.Fingerprint = strings.TrimSpace(*in.Fingerprint)
 		}
 		if zoneProvided {
 			acc.Zone = in.Zone
@@ -310,6 +350,7 @@ func UpdateAccount(state *app.State) gin.HandlerFunc {
 		state.OVH.Invalidate(acc.ID)
 		invalidateOrderMappingCache(acc.ID) // 换了凭据/endpoint,旧缓存里的订单可能已经不属于这个账户了
 		_ = state.ReloadAccounts()
+		RefreshSharedProxy(state)
 
 		valid, subsidiaryWarning := verifyAccountCreds(state, acc.ID)
 		c.JSON(http.StatusOK, gin.H{"account": sanitizeAccount(acc), "valid": valid, "subsidiaryWarning": subsidiaryWarning})
@@ -327,6 +368,7 @@ func DeleteAccountByID(state *app.State) gin.HandlerFunc {
 		state.OVH.Invalidate(id)
 		invalidateOrderMappingCache(id) // 订单映射按账户缓存,账户没了缓存也得走
 		_ = state.ReloadAccounts()
+		RefreshSharedProxy(state)
 		// 关联的内存数据也得清掉(queue / history / sniper_tasks)
 		reloadAfterAccountDelete(state, id)
 		state.Logger.Info("删除账户 + 级联清理: "+id, "accounts")
@@ -343,6 +385,7 @@ func SetDefaultAccountByID(state *app.State) gin.HandlerFunc {
 			return
 		}
 		_ = state.ReloadAccounts()
+		RefreshSharedProxy(state)
 		c.JSON(http.StatusOK, gin.H{"status": "success"})
 	}
 }

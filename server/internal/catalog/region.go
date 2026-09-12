@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/ovh-buy/server/internal/app"
+	"github.com/ovh-buy/server/internal/netfp"
 	"github.com/ovh-buy/server/internal/ovh"
 	"github.com/ovh-buy/server/internal/types"
 )
@@ -42,7 +43,9 @@ func ecoCatalogURL(subsidiary string) string {
 
 // fetchEcoCatalogBody 拉公开目录并把 body 交给 parse 处理(不带凭据,不占账户配额)。
 func fetchEcoCatalogBody(subsidiary string, parse func(io.Reader) error) error {
-	httpClient := &http.Client{Timeout: 60 * time.Second}
+	// 公开目录是按子公司缓存、跨账户共享的,按账户隔离没有意义 ——
+	// 但仍然别拿本机真实 IP 去打,走统一出口(见 netfp.Shared 的说明)。
+	httpClient := netfp.Shared(60 * time.Second)
 	req, err := http.NewRequest(http.MethodGet, ecoCatalogURL(subsidiary), nil)
 	if err != nil {
 		return err

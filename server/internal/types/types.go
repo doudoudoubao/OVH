@@ -18,14 +18,51 @@ type Config struct {
 	// NotifyWebhookURL 第二条通知通道:一个接收 JSON POST 的地址(钉钉/飞书/Bark/自建都行)。
 	// 补货监控的全部价值就是"有货那一刻你能收到消息",单通道意味着 Telegram 一挂就全盲。
 	NotifyWebhookURL string `json:"notifyWebhookUrl,omitempty"`
+
+	// DefaultRetryInterval 新建抢购任务的默认重试间隔(秒)。
+	// 网页弹窗、TG /buy、上架通知里的一键下单按钮不显式指定时都用它。
+	// 以前四条入队路径各写各的(30 / 30 / 30,前端弹窗还显示 60),用户既改不了也对不上。
+	DefaultRetryInterval int `json:"defaultRetryInterval,omitempty"`
+	// QuickOrderRetryInterval 监控触发的自动下单(/watch 自动抢)用的重试间隔(秒)。
+	// 单独一个值是因为场景不同:货刚出现那一刻要抢,窗口可能只有几十秒,
+	// 所以默认比普通任务激进得多;但太密会吃 OVH 的 429,这里交给用户自己权衡。
+	QuickOrderRetryInterval int `json:"quickOrderRetryInterval,omitempty"`
+}
+
+// 重试间隔的默认值与合法区间(秒)。
+const (
+	DefaultTaskRetryInterval  = 60
+	DefaultQuickRetryInterval = 2
+	MinRetryInterval          = 1
+	MaxRetryInterval          = 86400
+)
+
+// ClampRetryInterval 把重试间隔夹到合法区间;<= 0 视为"没设",退回 fallback。
+//
+// 处理器、入队路径、设置保存都走这一个函数。0 必须兜住:处理器的就绪判断是
+// `now - last >= interval`,间隔为 0 时恒真,任务会每秒重试一次把 OVH 刷到 429 ——
+// 旧库里 retry_interval 列后加的行、任何忘了设这个字段的入队路径都会踩到。
+func ClampRetryInterval(v, fallback int) int {
+	if v <= 0 {
+		v = fallback
+	}
+	if v < MinRetryInterval {
+		return MinRetryInterval
+	}
+	if v > MaxRetryInterval {
+		return MaxRetryInterval
+	}
+	return v
 }
 
 // DefaultConfig 默认配置
 func DefaultConfig() Config {
 	return Config{
-		Endpoint: "ovh-eu",
-		IAM:      "go-ovh-ie",
-		Zone:     "IE",
+		Endpoint:                "ovh-eu",
+		IAM:                     "go-ovh-ie",
+		Zone:                    "IE",
+		DefaultRetryInterval:    DefaultTaskRetryInterval,
+		QuickOrderRetryInterval: DefaultQuickRetryInterval,
 	}
 }
 
@@ -61,6 +98,24 @@ type OVHAccount struct {
 	IAM         string `json:"iam"`       // go-ovh-<zone-lower>
 	IsDefault   bool   `json:"isDefault"` // 默认账户（未指定时 fallback 用它）
 	CreatedAt   string `json:"createdAt"`
+
+	// ProxyURL 这个账户的出站代理。空 = 直连。
+	//
+	//	http://user:pass@host:port
+	//	socks5://user:pass@host:port
+	//
+	// 为什么要按账户隔离出口:OVH 的限流是按来源 IP 算的,多个账户共用一个出口时
+	// 一个账户被限流会把其它账户一起拖下水 —— 而这恰好发生在补货那一刻。
+	//
+	// 带凭据,所以和 AppSecret 一样加密落盘;GetAccounts 回前端时打码。
+	ProxyURL string `json:"proxyUrl,omitempty"`
+
+	// Fingerprint 出站指纹配置名(见 internal/netfp.Profiles)。空 = default。
+	//
+	// 注意它能做到的程度有限:Go 标准库不允许控制 JA3 的主要构成要素
+	// (套件顺序被忽略、TLS 1.3 套件不可配、扩展顺序固定),
+	// 所以这里改的是 TLS 版本区间、ALPN/h2、以及 UA 这类头。详见 netfp 包的说明。
+	Fingerprint string `json:"fingerprint,omitempty"`
 }
 
 // QueueItem 抢购队列项

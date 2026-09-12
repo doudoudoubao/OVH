@@ -136,6 +136,18 @@ func CheckUpdate(state *app.State) gin.HandlerFunc {
 			"body":        rel.Body,
 			"prerelease":  rel.Prerelease,
 			"checkedAt":   time.Now().UTC().Format(time.RFC3339),
+			// 容器里自更新是停用的 —— 界面据此把"立即更新"换成"怎么拉新镜像",
+			// 而不是给一个点了必然失败的按钮。
+			"inContainer": updater.InContainer(),
+			"updateHint":  containerHintIfNeeded(),
 		})
 	}
+}
+
+// containerHintIfNeeded 容器里返回更新指引,否则空串。
+func containerHintIfNeeded() string {
+	if updater.InContainer() {
+		return updater.ContainerUpdateHint
+	}
+	return ""
 }

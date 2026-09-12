@@ -1,0 +1,74 @@
+# OVH 控制台 —— Docker 部署
+#
+#   1. cp .env.example .env
+#   2. 编辑 .env，至少把 API_SECRET_KEY 换成你自己的随机串
+#   3. docker compose up -d
+#
+# 更新： docker compose pull && docker compose up -d
+# 日志： docker compose logs -f
+# 停止： docker compose down          （数据留在 ./data，不会丢）
+#
+# ⚠️ 数据全在 ./data 这一个目录里：SQLite 数据库、**数据库加密密钥**、缓存、日志。
+#    备份就备份这个目录。删了它 = 已保存的 OVH 凭据和 Telegram Token 再也解不开。
+
+services:
+  ovh-console:
+    image: ghcr.io/gokele/ovh:latest
+    container_name: ovh-console
+    restart: unless-stopped
+
+    ports:
+      # 默认只绑回环。这个服务能用你的 OVH 账户下单、能重装服务器 ——
+      # 不该直接对公网开。要远程访问就放在反向代理后面。
+      # 想换端口改 .env 里的 HOST_PORT。
+      - "${BIND_ADDR:-127.0.0.1}:${HOST_PORT:-20000}:20000"
+
+    volumes:
+      # 唯一需要持久化的目录。用 bind mount 是为了方便直接备份；
+      # 首次启动时容器会把它的归属改成 PUID:PGID（默认 10001）。
+      - ./data:/data
+
+    environment:
+      # 访问密码。没设的话 compose 会直接报错不让起 ——
+      # 默认值 123456 等于门没锁，而这扇门后面能花你的钱。
+      API_SECRET_KEY: ${API_SECRET_KEY:?请先 cp .env.example .env 并设置 API_SECRET_KEY}
+
+      # 数据库加密密钥。留空会自动生成并写进 ./data/.env（跟着卷走，不会丢）。
+      # 显式提供的好处是换机器/迁移/k8s secret 时更可控。
+      #
+      # ⚠️ 下面这几个写成 `KEY:`（没有值）而不是 `KEY: ${KEY:-}`，是有原因的：
+      # 后者在宿主机没定义时会往容器里塞一个**空但已设置**的变量，
+      # 而空变量和"没设"对很多程序是两回事。
+      # OVH_DB_KEY 上踩过一次：空变量会让程序读不到 .env 里的真密钥，
+      # 于是每次启动重新生成一把 —— 之前加密的凭据永久解不开。
+      # 写成 `KEY:` 时 compose 只在宿主机真的定义了它时才传进去。
+      OVH_DB_KEY:
+
+      TZ: ${TZ:-Asia/Shanghai}
+      # 容器内文件的属主。想和宿主机当前用户对齐就填 id -u / id -g
+      PUID: ${PUID:-10001}
+      PGID: ${PGID:-10001}
+      # 放在反代后面时按需设置（同样写成不带值的形式）
+      CORS_ALLOWED_ORIGINS:
+      TRUSTED_PROXIES:
+
+    # 日志轮转。
+    #
+    # Docker 默认的 json-file 驱动**没有上限**，而这个程序的监控循环
+    # 每 5 秒写一次日志 —— 跑几个月能把磁盘写满，而磁盘满了数据库就写不进去，
+    # 抢购记录会一起丢。这不是理论问题，是必然会发生的。
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+    # 健康检查在镜像里已经定义好了（打 /api/health，那个端点不需要鉴权）。
+    # 想让 compose 等它真的健康再算启动完成，取消下面两行的注释：
+    # healthcheck:
+    #   start_period: 30s
+
+    # 自更新在容器里是停用的（镜像里设了 OVH_IN_CONTAINER=1）。
+    # 新二进制只会写进容器的可写层，容器一重建就回到镜像里的旧版本 ——
+    # 你会看到「更新成功」之后版本号又变回去。
+    # 更新请用 docker compose pull && docker compose up -d。

@@ -34,6 +34,7 @@ import {
   useQueueList,
   useToggleQueueItem,
   useRemoveQueueItem,
+  useUpdateQueueInterval,
   useClearQueue,
   useCreateQueueItem,
   type QueueItem,
@@ -42,13 +43,14 @@ import {
 } from "@/hooks/use-queue";
 import { useServers } from "@/hooks/use-servers";
 import { OVH_DATACENTERS as OVH_DC_LIST } from "@/lib/datacenters";
+import { RETRY_INTERVAL, useSettings } from "@/hooks/use-settings";
 import { useActiveAccount } from "@/hooks/use-active-account";
 import { useAccounts, findAccountByID } from "@/hooks/use-accounts";
 import { TimingChip } from "@/components/common/TimingChip";
 import { AccountChip } from "@/components/common/AccountChip";
 import { PlanCodeCombobox } from "@/components/common/PlanCodeCombobox";
 import { OptionGroupSection } from "@/components/common/OptionGroupSection";
-import { groupOptions, type OptionGroupKey } from "@/lib/option-groups";
+import { describeOptionCodes, groupOptions, type OptionGroupKey } from "@/lib/option-groups";
 import {
   useAvailability,
   buildVariantIndex,
@@ -68,8 +70,70 @@ export const Route = createFileRoute("/queue")({
 /** OVH 数据中心列表：复用 lib/datacenters.ts 的共享常量 */
 const OVH_DATACENTERS = OVH_DC_LIST;
 
-/** 任务重试间隔默认值（秒），与后端 TASK_RETRY_INTERVAL 保持一致 */
-const DEFAULT_RETRY_INTERVAL = 60;
+/** 新建任务时的兜底间隔。真正的默认值来自设置（/api/settings.defaultRetryInterval），
+ *  这个常量只在配置还没读到时占位 —— 和后端 types.DefaultTaskRetryInterval 一致 */
+const FALLBACK_RETRY_INTERVAL = RETRY_INTERVAL.defaultTask;
+
+/**
+ * 队列卡片上那个可点的秒数。
+ *
+ * 点一下变输入框，回车/失焦提交。改的是这一条任务自己的间隔，
+ * 处理器每轮都读任务上的值，所以下一轮就生效，不用重建任务。
+ */
+function IntervalEditor({ id, value }: { id: string; value: number }) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(String(value));
+  const update = useUpdateQueueInterval();
+
+  const commit = () => {
+    setEditing(false);
+    const n = Number(draft);
+    if (!n || n === value) return setDraft(String(value));
+    if (n < RETRY_INTERVAL.min || n > RETRY_INTERVAL.max) {
+      toast.error(`重试间隔要在 ${RETRY_INTERVAL.min} ~ ${RETRY_INTERVAL.max} 秒之间`);
+      return setDraft(String(value));
+    }
+    update.mutate({ id, retryInterval: n });
+  };
+
+  if (!editing) {
+    return (
+      <button
+        type="button"
+        onClick={() => {
+          setDraft(String(value));
+          setEditing(true);
+        }}
+        className="font-medium text-foreground underline decoration-dotted underline-offset-2 hover:text-primary"
+        title="点击修改这条任务的重试间隔"
+      >
+        {value}
+      </button>
+    );
+  }
+  return (
+    <input
+      autoFocus
+      type="text"
+      inputMode="numeric"
+      value={draft}
+      onChange={(e) => {
+        const v = e.target.value;
+        if (v === "" || /^\d*$/.test(v)) setDraft(v);
+      }}
+      onBlur={commit}
+      onKeyDown={(e) => {
+        if (e.key === "Enter") commit();
+        if (e.key === "Escape") {
+          setDraft(String(value));
+          setEditing(false);
+        }
+      }}
+      // 手机端 16px 防 iOS 聚焦缩放
+      className="w-14 px-1 py-0.5 rounded border border-input bg-background text-base sm:text-[11px] text-center"
+    />
+  );
+}
 
 function QueuePage() {
   const queue = useQueueList();
@@ -97,7 +161,7 @@ function QueuePage() {
   const items = queue.data || [];
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-3 sm:space-y-6">
       <PageHeader
         icon={ClipboardList}
         title="抢购队列"
@@ -235,7 +299,7 @@ function CreateQueueDialog({
 }) {
   const servers = useServers();
   const create = useCreateQueueItem();
-  // 下单账户 = 左侧菜单栏选的全局账户,本页不再单独选
+  // 下单账户 = 左侧菜单栏(手机端在顶栏)选的全局账户,本页不再单独选
   const [globalAccountId] = useActiveAccount();
   // 库存按"实际下单的那个账户"所在站点查:EU/US/CA 三站的 availabilities 互不相通
   // (实测 US 站 423 个 planCode,只有 134 个与 EU 重合),用别区的库存点红绿灯,
@@ -253,7 +317,16 @@ function CreateQueueDialog({
   const [planCode, setPlanCode] = useState(initialPlanCode || "");
   const [datacenters, setDatacenters] = useState<string[]>([]);
   const [quantity, setQuantity] = useState("1");
-  const [retryInterval, setRetryInterval] = useState(String(DEFAULT_RETRY_INTERVAL));
+  // 默认间隔跟着设置页走(配置没读到时用兜底常量)。
+  // 以前这里硬编码 60,而后端四条入队路径写的是 30 —— 弹窗显示的和实际用的对不上。
+  const settingsQ = useSettings();
+  const cfgDefault = settingsQ.data?.defaultRetryInterval || FALLBACK_RETRY_INTERVAL;
+  const [retryInterval, setRetryInterval] = useState("");
+  // 配置到手后填进去(用户还没动过输入框才填,不覆盖他正在打的字)
+  const touchedRef = useRef(false);
+  useEffect(() => {
+    if (!touchedRef.current) setRetryInterval(String(cfgDefault));
+  }, [cfgDefault]);
   // 默认不自动付款:自动扣钱必须显式打开。
   // 这个对话框和服务器卡片弹的那个是两条建任务入口,开关两边都要有 ——
   // 上一版只加了卡片那边,这边漏了
@@ -354,7 +427,8 @@ function CreateQueueDialog({
     setPlanCode("");
     setDatacenters([]);
     setQuantity("1");
-    setRetryInterval(String(DEFAULT_RETRY_INTERVAL));
+    touchedRef.current = false;
+    setRetryInterval(String(cfgDefault));
     setPicked({});
     setExtraInput("");
     prevPlanCodeRef.current = "";
@@ -384,7 +458,7 @@ function CreateQueueDialog({
       planCode: planCode.trim(),
       datacenters,
       quantity: qty,
-      retryInterval: Number(retryInterval) || DEFAULT_RETRY_INTERVAL,
+      retryInterval: Number(retryInterval) || cfgDefault,
       options: parsedOptions,
       autoPay,
     });
@@ -411,25 +485,13 @@ function CreateQueueDialog({
         </DialogHeader>
 
         <div className="space-y-5 py-2">
-          {/* 账户只在左侧菜单栏切,这里只显示当前是谁 */}
+          {/* 当前账户不在这里重复显示 —— 顶栏(手机)/侧栏(桌面)的切换器始终可见,
+              对话框打开时它也没被盖住。
+              但下面这两条要留着:一条是规则(拿错站点的 planCode 必然被拒),
+              一条是提交会被拦掉的理由,都不是"当前账户是谁"的重复。 */}
           <div>
-            <label className="block text-[13px] font-medium mb-1.5">OVH 账户</label>
-            <div className="flex items-center gap-2 px-3 py-2 rounded-xl border border-border bg-secondary/30">
-              {/* 「未选择账户」只该出现在"确实没选/没有账户"时。列表没读到也写这四个字,
-                  等于把一次网络失败说成用户自己的配置问题。 */}
-              <span className="text-[13px] font-medium">
-                {activeAcc?.name ||
-                  (accountsQ.isPending
-                    ? "读取账户中…"
-                    : accountsQ.isError
-                      ? "账户列表读取失败"
-                      : "未选择账户")}
-              </span>
-              {activeAcc && <span className="text-[11px] text-muted-foreground">{activeAcc.zone}</span>}
-              <span className="ml-auto text-[10px] text-muted-foreground">在左侧菜单切换</span>
-            </div>
-            <p className="text-[11px] text-muted-foreground mt-1">
-              下单用该账户的凭据,购物车 subsidiary 跟随账户 zone。planCode 也要是这个站点的 ——
+            <p className="text-[11px] text-muted-foreground">
+              下单用当前账户的凭据,购物车 subsidiary 跟随账户 zone。planCode 也要是这个站点的 ——
               三区目录互不相通
             </p>
             {/* 没有账户就没法下单,底下的创建按钮会一直灰着 —— 必须讲清是"没读到"还是"真没有" */}
@@ -558,12 +620,13 @@ function CreateQueueDialog({
                 value={retryInterval}
                 onChange={(e) => {
                   const v = e.target.value;
+                  touchedRef.current = true;
                   if (v === "" || /^\d*$/.test(v)) setRetryInterval(v);
                 }}
-                placeholder={`默认: ${DEFAULT_RETRY_INTERVAL}`}
+                placeholder={`默认: ${cfgDefault}`}
               />
               <p className="text-[11px] text-muted-foreground mt-1">
-                抢购失败后等待秒数再重试
+                抢购失败后等待秒数再重试（默认值在「设置 → 抢购」里改）
               </p>
             </div>
           </div>
@@ -725,7 +788,14 @@ function QueueRow({
             <AccountChip accountId={item.accountId} />
             <Chip tone="default">DC {item.datacenter.toUpperCase()}</Chip>
             {item.options && item.options.length > 0 && (
-              <Chip tone="default">含 {item.options.length} 个可选配置</Chip>
+              // 以前只显示个数。而一个型号底下几套配置的差别恰恰在这里 ——
+              // 同时下了三单时,用户看到三张"含 2 个可选配置"的卡片,
+              // 分不出哪一单抢的是 64G+NVMe、哪一单是 32G+HDD。
+              // describeOptionCodes 纯靠 code 正则解析,不需要目录,
+              // 机型下架或目录没拉到时也能显示。
+              <Chip tone="default" title={item.options.join("\n")}>
+                {describeOptionCodes(item.options)}
+              </Chip>
             )}
             {item.autoPay && (
               <Chip tone="warning" title="下单成功后会用 OVH 默认支付方式自动扣款">
@@ -743,8 +813,16 @@ function QueueRow({
             ) : item.status === "completed" ? (
               <span>已完成</span>
             ) : (
-              <span>
-                下次尝试 {item.retryCount > 0 ? `${item.retryInterval}秒后（第 ${item.retryCount + 1} 次）` : "即将开始"}
+              <span className="inline-flex items-center gap-1">
+                下次尝试
+                {item.retryCount > 0 ? (
+                  <>
+                    <IntervalEditor id={item.id} value={item.retryInterval} />
+                    秒后（第 {item.retryCount + 1} 次）
+                  </>
+                ) : (
+                  "即将开始"
+                )}
               </span>
             )}
             {timing && (

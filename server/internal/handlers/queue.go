@@ -5,6 +5,8 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -55,9 +57,8 @@ func AddQueueItem(state *app.State) gin.HandlerFunc {
 			c.JSON(http.StatusBadRequest, gin.H{"status": "error", "error": hint})
 			return
 		}
-		if body.RetryInterval == 0 {
-			body.RetryInterval = 30
-		}
+		// 没给 / 给 0 = 用全局默认(设置页可改);超出区间夹回来
+		body.RetryInterval = types.ClampRetryInterval(body.RetryInterval, state.Config.RetryInterval())
 		item := types.QueueItem{
 			ID:            uuid.NewString(),
 			AccountID:     body.AccountID,
@@ -72,22 +73,19 @@ func AddQueueItem(state *app.State) gin.HandlerFunc {
 			LastCheckTime: 0,
 			AutoPay:       body.AutoPay,
 		}
-		state.QueueMu.Lock()
-		state.Queue = append(state.Queue, item)
-		state.QueueMu.Unlock()
-		// 落库失败不撤任务:它已经在内存里跑起来了,撤掉等于用户明确要抢的机器不抢了。
-		// 但必须说出来 —— 不落库意味着重启后这条任务就没了,而界面上它看着一切正常。
-		warn := ""
-		if err := state.SaveQueue(); err != nil {
-			warn = "任务已在本次运行中启动，但没能写进数据库，重启后会丢失：" + err.Error()
-			state.Logger.Error("添加任务后保存队列失败: "+err.Error(), "queue")
+		// 入队 + 落库是一件事:EnqueueItems 失败会把这条从内存撤回,
+		// 不留"这次能跑但重启就丢"的半成功任务
+		if err := state.EnqueueItems([]types.QueueItem{item}, false); err != nil {
+			state.Logger.Error("添加任务后保存队列失败,已撤回: "+err.Error(), "queue")
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"status": "error",
+				"error":  "任务没能写进数据库，已撤回：" + err.Error(),
+			})
+			return
 		}
 		state.Logger.Info("添加任务 "+item.ID+" ("+item.PlanCode+" 在 "+item.Datacenter+", 账户 "+body.AccountID+") 到队列并立即启动 (状态: running)", "")
-		resp := gin.H{"status": "success", "id": item.ID}
-		if warn != "" {
-			resp["warning"] = warn
-		}
-		c.JSON(http.StatusOK, resp)
+		// 不再有 warning 分支:落库要么成功、要么整条撤回并报错,没有中间态
+		c.JSON(http.StatusOK, gin.H{"status": "success", "id": item.ID})
 	}
 }
 
@@ -96,10 +94,10 @@ func RemoveQueueItem(state *app.State) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		id := c.Param("id")
 
-		state.DeletedTaskIDsMu.Lock()
-		state.DeletedTaskIDs[id] = struct{}{}
-		state.DeletedTaskIDsMu.Unlock()
-		state.Logger.Info("标记任务 "+id+" 为删除，后台线程将立即停止处理", "system")
+		// MarkTaskDeleted 除了打标记,还会取消这条任务正在进行的下单(如果它正跑在
+		// PurchaseServer 里)。以前只打标记,处理器要到下一轮才看得见,这一轮照跑到结账。
+		state.MarkTaskDeleted(id)
+		state.Logger.Info("标记任务 "+id+" 为删除，正在进行的下单已取消，后台线程将停止处理", "system")
 
 		state.QueueMu.Lock()
 		var removed *types.QueueItem
@@ -131,16 +129,56 @@ func RemoveQueueItem(state *app.State) gin.HandlerFunc {
 	}
 }
 
+// UpdateQueueInterval PUT /api/queue/:id/interval  body: { "retryInterval": 秒 }
+// 改一条正在跑的任务的重试间隔。处理器每轮都读 item 上的值,所以改完下一轮就生效。
+func UpdateQueueInterval(state *app.State) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		id := c.Param("id")
+		var body struct {
+			RetryInterval int `json:"retryInterval"`
+		}
+		if err := c.ShouldBindJSON(&body); err != nil ||
+			body.RetryInterval < types.MinRetryInterval || body.RetryInterval > types.MaxRetryInterval {
+			c.JSON(http.StatusBadRequest, gin.H{"status": "error",
+				"error": fmt.Sprintf("重试间隔必须是 %d ~ %d 之间的整数秒", types.MinRetryInterval, types.MaxRetryInterval)})
+			return
+		}
+		found := false
+		state.QueueMu.Lock()
+		for i := range state.Queue {
+			if state.Queue[i].ID == id {
+				state.Queue[i].RetryInterval = body.RetryInterval
+				state.Queue[i].UpdatedAt = types.NowISO()
+				found = true
+				break
+			}
+		}
+		state.QueueMu.Unlock()
+		if !found {
+			c.JSON(http.StatusNotFound, gin.H{"status": "error", "error": "任务不存在"})
+			return
+		}
+		if err := state.SaveQueue(); err != nil {
+			state.Logger.Error("改任务间隔后保存队列失败: "+err.Error(), "queue")
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"status": "error",
+				"error":  "间隔已在本次运行中改掉，但没能写进数据库，重启后会回到原值：" + err.Error(),
+			})
+			return
+		}
+		state.Logger.Info(fmt.Sprintf("任务 %s 重试间隔改为 %d 秒", id, body.RetryInterval), "queue")
+		c.JSON(http.StatusOK, gin.H{"status": "success"})
+	}
+}
+
 // ClearQueue DELETE /api/queue/clear
 func ClearQueue(state *app.State) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		state.QueueMu.Lock()
 		count := len(state.Queue)
-		state.DeletedTaskIDsMu.Lock()
 		for _, it := range state.Queue {
-			state.DeletedTaskIDs[it.ID] = struct{}{}
+			state.MarkTaskDeleted(it.ID) // 同时取消正在进行的下单
 		}
-		state.DeletedTaskIDsMu.Unlock()
 		state.Queue = []types.QueueItem{}
 		state.QueueMu.Unlock()
 		if err := state.SaveQueue(); err != nil {
@@ -194,7 +232,32 @@ func UpdateQueueStatus(state *app.State) gin.HandlerFunc {
 // 手动刷新所有未到终态订单的支付状态(GET /me/order/{id}/status)。
 // 后台每 10 分钟也会自动刷,这里是给"我刚付完款想马上看到"的场景。
 func RefreshOrderStatuses(state *app.State) gin.HandlerFunc {
+	// 手动刷新会对每条未终态订单各打一次 /me/order/{id},而 force=true 正是用来
+	// 跳过那个 2 分钟节流的 —— 等于把限流闸门交给用户的手速。
+	// OVH 对 /me 命名空间有自己的限流,打多了返回 429,而抢购主链路
+	// (查库存 / 建车 / 结账)跟它共用同一个账户配额:刷历史把配额刷没了,
+	// 补货那一刻就抢不到。所以入口这层必须有自己的节流。
+	var (
+		mu       sync.Mutex
+		lastCall time.Time
+	)
+	const minInterval = 15 * time.Second
+
 	return func(c *gin.Context) {
+		mu.Lock()
+		if wait := minInterval - time.Since(lastCall); !lastCall.IsZero() && wait > 0 {
+			mu.Unlock()
+			c.JSON(http.StatusTooManyRequests, gin.H{
+				"success": false,
+				"error": fmt.Sprintf("刷新太频繁,请等 %d 秒。手动刷新会对每条未完成订单各查一次 OVH,"+
+					"把账户配额刷光会影响正在跑的抢购。", int(wait.Seconds())+1),
+				"retryAfterSeconds": int(wait.Seconds()) + 1,
+			})
+			return
+		}
+		lastCall = time.Now()
+		mu.Unlock()
+
 		n := purchase.RefreshOrderStatuses(state, true)
 		c.JSON(http.StatusOK, gin.H{"success": true, "updated": n})
 	}

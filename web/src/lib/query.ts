@@ -140,6 +140,21 @@ export const qk = {
     emails: (accountId: string) => ["account", "emails", accountId] as const,
   },
 
+  // 账户的出站代理:健康状况 + 最近一次出口 IP 测试。
+  //
+  // proxyStatus 是真的去问后端(30 秒一轮),proxyTest 不是 —— 它没有对应的 GET,
+  // 只是「测试出口 IP」那一下把结果塞进缓存的存放处(见 use-accounts 的 useProxyTest)。
+  // 走 query 缓存而不是组件 state,是因为测试在编辑框里点、结果要显示在账户列表上:
+  // 多个账户的出口 IP 并排比对是确认隔离生效的唯一手段,两个账户同一个 IP 就等于没生效。
+  accounts: {
+    proxyStatus: () => ["accounts", "proxy-status"] as const,
+    proxyTest: (accountId: string) => ["accounts", "proxy-test", accountId] as const,
+    // 链路检测同理,也没有对应的 GET,只是「链路检测」那一下把结果存起来的地方。
+    // 它比出口 IP 测试贵得多(每个目标真打 3 次),所以结果必须留住:
+    // 关掉弹窗再打开看到的是上次那份 + 那次的时间,而不是又去打一轮 OVH。
+    proxyCheck: (accountId: string) => ["accounts", "proxy-check", accountId] as const,
+  },
+
   // 历史与日志
   history: () => ["history"] as const,
   logs: () => ["logs"] as const,

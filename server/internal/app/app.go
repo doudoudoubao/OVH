@@ -1,7 +1,9 @@
 package app
 
 import (
+	"context"
 	"fmt"
+	"net/http"
 	"strings"
 	"sync"
 	"time"
@@ -11,6 +13,7 @@ import (
 	"github.com/ovh-buy/server/internal/config"
 	"github.com/ovh-buy/server/internal/db"
 	"github.com/ovh-buy/server/internal/logger"
+	"github.com/ovh-buy/server/internal/netfp"
 	"github.com/ovh-buy/server/internal/ovh"
 	"github.com/ovh-buy/server/internal/storage"
 	"github.com/ovh-buy/server/internal/types"
@@ -135,6 +138,13 @@ type State struct {
 	DeletedTaskIDsMu sync.Mutex
 	DeletedTaskIDs   map[string]struct{}
 
+	// 正在跑 PurchaseServer 的任务 → 取消函数。
+	// DeletedTaskIDs 只是个标记,处理器要到下一轮才会看它;而一轮下单链路有 10 次
+	// OVH 调用、每次最长 60s。用户删任务的那一刻如果链路正跑到一半,这里的 cancel
+	// 让正在进行的 HTTP 调用立刻中断,而不是把这一轮跑完 —— 包括结账。
+	taskCancelMu sync.Mutex
+	taskCancel   map[string]context.CancelFunc
+
 	VPSSubsMu sync.Mutex
 
 	// 保存串行化锁。Save* 是"快照 + 全表覆盖",两个并发保存里
@@ -160,6 +170,9 @@ type State struct {
 
 	MonitorRunning        bool
 	QueueProcessorRunning bool
+
+	// onProxyError 代理故障回调,由 main 接到 proxyguard。
+	onProxyError func(accountID string, err error)
 }
 
 // NewState 构造应用状态。DB 必须已 Open。
@@ -171,6 +184,7 @@ func NewState(paths storage.Paths, cfg *config.Store, lg *logger.Logger, sqliteD
 		ServerCache:           NewServerListCache(),
 		DB:                    sqliteDB,
 		DeletedTaskIDs:        make(map[string]struct{}),
+		taskCancel:            make(map[string]context.CancelFunc),
 		Accounts:              []types.OVHAccount{},
 		Queue:                 []types.QueueItem{},
 		History:               []types.PurchaseHistoryEntry{},
@@ -432,6 +446,102 @@ func (s *State) LoadFailures() map[string]string {
 	return out
 }
 
+// MarkTaskDeleted 标记任务已删除,并取消它正在进行的下单(如果有)。
+//
+// 所有删任务的入口(网页删单个 / 清空、TG /cancel、处理器复核)都必须走这里。
+// 只写 DeletedTaskIDs 不调 cancel 的话,PurchaseServer 会把这一轮跑完 —— 包括结账:
+// 用户在"有货"通知弹出后两秒内点了删除,单照样下出去。
+// EnqueueItems 入队并落库。失败时把这批从内存里撤回,再把错返回给调用方。
+//
+// 四条入队路径(网页新建 / 快速下单 / TG 一键按钮 / TG 文本下单)以前各写各的,
+// 对"落库失败"的处理有四种:撤回+归还按钮、返回 warning 但内存保留、
+// 返回带警告的文本、以及 `_ = SaveQueue()` 直接吞掉。
+// 最后那种在自动下单路径上 —— 监控发现有货、建了任务、落库失败无人知晓,
+// 重启后任务没了,而用户以为一直在抢。
+//
+// 统一成一种语义:**要么内存和磁盘都有,要么两边都没有**。
+// 半成功状态("这次能跑但重启就丢")对抢购来说是最坏的,它看起来完全正常。
+//
+// prepend=true 把这批放到队首(快速下单要抢在别的任务前面)。
+func (s *State) EnqueueItems(items []types.QueueItem, prepend bool) error {
+	if len(items) == 0 {
+		return nil
+	}
+	s.QueueMu.Lock()
+	if prepend {
+		s.Queue = append(append([]types.QueueItem{}, items...), s.Queue...)
+	} else {
+		s.Queue = append(s.Queue, items...)
+	}
+	s.QueueMu.Unlock()
+
+	if err := s.SaveQueue(); err != nil {
+		// 撤回:按 ID 精确删,不能按下标 —— 这中间别的 goroutine 可能也在增删
+		ids := make(map[string]struct{}, len(items))
+		for _, it := range items {
+			ids[it.ID] = struct{}{}
+		}
+		s.QueueMu.Lock()
+		kept := make([]types.QueueItem, 0, len(s.Queue))
+		for _, it := range s.Queue {
+			if _, bad := ids[it.ID]; !bad {
+				kept = append(kept, it)
+			}
+		}
+		s.Queue = kept
+		s.QueueMu.Unlock()
+		return err
+	}
+	return nil
+}
+
+func (s *State) MarkTaskDeleted(id string) {
+	s.DeletedTaskIDsMu.Lock()
+	s.DeletedTaskIDs[id] = struct{}{}
+	s.DeletedTaskIDsMu.Unlock()
+
+	s.taskCancelMu.Lock()
+	cancel := s.taskCancel[id]
+	delete(s.taskCancel, id)
+	s.taskCancelMu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+}
+
+// IsTaskDeleted 任务是否已被标记删除。
+func (s *State) IsTaskDeleted(id string) bool {
+	s.DeletedTaskIDsMu.Lock()
+	defer s.DeletedTaskIDsMu.Unlock()
+	_, ok := s.DeletedTaskIDs[id]
+	return ok
+}
+
+// RegisterTaskCancel 登记一个任务这一轮下单的取消函数。PurchaseServer 开跑前调。
+//
+// 调用方登记完必须再查一次 IsTaskDeleted:登记前一瞬间刚好被删的话,
+// MarkTaskDeleted 那时还找不到 cancel 函数,ctx 不会被取消 —— 那次复核把这个窗口堵上。
+func (s *State) RegisterTaskCancel(id string, cancel context.CancelFunc) {
+	s.taskCancelMu.Lock()
+	if s.taskCancel == nil {
+		s.taskCancel = make(map[string]context.CancelFunc)
+	}
+	s.taskCancel[id] = cancel
+	s.taskCancelMu.Unlock()
+}
+
+// UnregisterTaskCancel 一轮下单结束后注销并释放 ctx。用 defer 调,成败都要走。
+// 已被 MarkTaskDeleted 摘掉的话这里是空操作。
+func (s *State) UnregisterTaskCancel(id string) {
+	s.taskCancelMu.Lock()
+	cancel := s.taskCancel[id]
+	delete(s.taskCancel, id)
+	s.taskCancelMu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+}
+
 // SaveHistory 把内存中 History 整表覆盖写入 SQLite
 func (s *State) SaveHistory() error {
 	if err := s.SaveBlocked("history"); err != nil {
@@ -544,4 +654,37 @@ func (s *State) SaveAll() {
 	if err := s.SaveServers(); err != nil {
 		s.Logger.Error("save servers: "+err.Error(), "system")
 	}
+}
+
+// HTTPClientFor 按账户的出站配置建一个普通 HTTP 客户端。
+//
+// 给那些**不带凭据**但仍然打 OVH 的请求用：公开目录、可用性探测等等。
+// 它们以前一律走直连 —— 于是即便每个账户都配了代理，这些请求仍然从本机
+// 真实 IP 发出去，出口隔离漏了一半。
+//
+// accountID 为空 → 默认账户的配置。账户不存在 → 直连（这些是公开接口，
+// 没有账户也该能查，不该因为找不到账户就整个功能失效）。
+//
+// 和带凭据那条路一样：配了代理却建不出来时返回错误，**不退回直连**。
+func (s *State) HTTPClientFor(accountID string, timeout time.Duration) (*http.Client, error) {
+	acc, ok := s.FindAccount(accountID)
+	if !ok {
+		return &http.Client{Timeout: timeout}, nil
+	}
+	prof, _ := netfp.LookupProfile(acc.Fingerprint)
+	return netfp.Client(netfp.Options{
+		ProxyURL: acc.ProxyURL,
+		Profile:  prof,
+		Timeout:  timeout,
+		OnProxyError: func(e error) {
+			if s.onProxyError != nil {
+				s.onProxyError(acc.ID, e)
+			}
+		},
+	})
+}
+
+// SetProxyErrorHook 注入代理故障回调，供 HTTPClientFor 建出来的客户端使用。
+func (s *State) SetProxyErrorHook(fn func(accountID string, err error)) {
+	s.onProxyError = fn
 }
