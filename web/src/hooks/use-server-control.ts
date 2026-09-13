@@ -1,5 +1,6 @@
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api";
+import { toast } from "sonner";
 import { qk } from "@/lib/query";
 import type { PartialList } from "./partial-list";
 import { useActiveAccount } from "@/hooks/use-active-account";
@@ -574,10 +575,17 @@ export interface DiskGroupDisk {
   unit: string;
   technology?: string;
   interface?: string;
+  /** OVH dedicated.server.DiskTypeEnum:NVMe / SSD / SAS / SATA / Unknown */
+  diskType?: string;
 }
 export interface DiskGroup {
   raidController?: string;
   disks: DiskGroupDisk[];
+  /** 后端一直在发这个字段(server_control_hardware.go),只是类型里漏了声明。
+   *  它是区分 SSD 和机械盘的唯一依据 —— 混合盘要靠它决定系统装哪一组。 */
+  diskType?: string;
+  description?: string;
+  id?: number;
 }
 
 export function useServerDiskInfo(serviceName: string | null, enabled = true) {
@@ -1424,5 +1432,123 @@ export function useRebootServer() {
       const res = await api.post(`/server-control/${serviceName}/reboot`);
       return res.data;
     },
+  });
+}
+
+/** 14 天无理由撤单的资格。eligible=false 时 reason 区分几种完全不同的"不能退" */
+export interface RetractionInfo {
+  eligible: boolean;
+  /** waived=下单时弃权 / expired=过期 / order_not_found / order_lookup_failed / order_read_failed / bad_date */
+  reason?: string;
+  message?: string;
+  orderId?: number;
+  orderUrl?: string;
+  /** 下单日。撤回期从这天起算，不是从服务器开通日起算 —— 两者常差好几天 */
+  orderDate?: string;
+  retractionDate?: string;
+  hoursLeft?: number;
+  reasons?: { value: string; label: string }[];
+}
+
+/**
+ * 这台机器还能不能无理由撤单。
+ *
+ * 判据是 OVH 返回的 retractionDate,不是前端自己算"开通不到 14 天" ——
+ * v0.1.24 之前下的单在结账时就放弃了撤回权,OVH 不给它们 retractionDate。
+ * 自己算的话那些机器会显示一个点了必然失败的退款按钮。
+ *
+ * 不自动重试:订单映射冷的时候后端会返回 order_lookup_failed 让用户去同步,
+ * 反复重试只会对着同一个冷缓存打空枪。
+ */
+export function useRetraction(serviceName: string | null) {
+  return useQuery<RetractionInfo>({
+    queryKey: ["server-control", "retraction", serviceName],
+    queryFn: async () =>
+      (await api.get<RetractionInfo>(`/server-control/${encodeURIComponent(serviceName!)}/retraction`)).data,
+    enabled: !!serviceName,
+    staleTime: 5 * 60_000,
+    retry: false,
+    refetchOnWindowFocus: false,
+  });
+}
+
+/** 提交撤单申请。不可逆:订单退款 + 服务器注销 */
+export function useRequestRetraction(serviceName: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (p: { reason: string; comment: string }) =>
+      (
+        await api.post(`/server-control/${encodeURIComponent(serviceName)}/retraction`, {
+          ...p,
+          confirm: true,
+        })
+      ).data,
+    onSuccess: (d: any) => {
+      qc.invalidateQueries({ queryKey: ["server-control", "retraction"] });
+      qc.invalidateQueries({ queryKey: ["server-control", "list"] });
+      toast.success(d?.message || "撤单申请已提交");
+    },
+    onError: (e: any) => toast.error(e?.response?.data?.error || "撤单申请失败"),
+  });
+}
+
+// ───────────────────────────────── 救援模式 ─────────────────────────────────
+
+export interface RescueBoot {
+  bootId: number;
+  bootType?: string;
+  kernel?: string;
+  description?: string;
+}
+export interface RescueStatus {
+  inRescue: boolean;
+  currentBoot: number;
+  rescueMail?: string;
+  boots: RescueBoot[];
+}
+
+/** 这台机现在是不是救援启动 + 有哪些救援项可选 */
+export function useRescueStatus(serviceName: string | null, enabled = true) {
+  return useQuery({
+    queryKey: qk.serverControl.rescue(serviceName || ""),
+    queryFn: async (): Promise<RescueStatus> => {
+      const d = (await api.get(`/server-control/${serviceName}/rescue`)).data;
+      return {
+        inRescue: d?.inRescue === true,
+        currentBoot: Number(d?.currentBoot) || 0,
+        rescueMail: d?.rescueMail || "",
+        boots: Array.isArray(d?.boots) ? d.boots : [],
+      };
+    },
+    enabled: !!serviceName && enabled,
+    staleTime: 30_000,
+  });
+}
+
+/** 进救援:改 netboot + 设收信邮箱 + 重启,一次做完 */
+export function useEnterRescue(serviceName: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (v: { email?: string; sshKey?: string; bootId?: number }) =>
+      (await api.post(`/server-control/${serviceName}/rescue`, { ...v, confirm: true })).data,
+    onSuccess: (d: any) => {
+      toast.success(d?.message || "已切到救援模式并重启");
+      qc.invalidateQueries({ queryKey: qk.serverControl.rescue(serviceName) });
+    },
+    onError: (e: any) => toast.error(e.response?.data?.error || "进入救援模式失败"),
+  });
+}
+
+/** 退出救援:切回硬盘启动 + 重启 */
+export function useExitRescue(serviceName: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async () =>
+      (await api.post(`/server-control/${serviceName}/rescue/exit`, { confirm: true })).data,
+    onSuccess: (d: any) => {
+      toast.success(d?.message || "已切回硬盘启动并重启");
+      qc.invalidateQueries({ queryKey: qk.serverControl.rescue(serviceName) });
+    },
+    onError: (e: any) => toast.error(e.response?.data?.error || "退出救援模式失败"),
   });
 }

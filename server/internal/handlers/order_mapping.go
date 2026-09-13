@@ -50,6 +50,28 @@ func invalidateOrderMappingCache(accountID string) {
 	orderMappingMu.Unlock()
 }
 
+// orderMappingFor 只读订单映射缓存,不触发同步。
+//
+// 为什么不复用 GetOrderMapping 的同步逻辑:那是一次几十个 OVH 请求、要跑好几秒的
+// 全量扫描(/dedicated/server + 每台的 serviceInfos + /me/order + 每单的 details)。
+// 撤回入口只是页面上一个小卡片,不该因为渲染它就把账户配额打一遍 ——
+// 而这个配额和抢购主链路是共用的。
+//
+// 缓存冷时返回 ok=false,调用方据此提示"去点同步订单",而不是自己发起同步。
+func orderMappingFor(state *app.State, c *gin.Context) (map[string]interface{}, error) {
+	acc, ok := ovhAccountFor(state, c)
+	if !ok {
+		return nil, fmt.Errorf("未配置 OVH 账户")
+	}
+	orderMappingMu.Lock()
+	defer orderMappingMu.Unlock()
+	entry, hit := orderMappingCache[acc.ID]
+	if !hit || time.Since(entry.at) >= orderMappingDuration {
+		return nil, fmt.Errorf("订单映射尚未同步或已过期,请先在服务器控制页点「同步订单」")
+	}
+	return entry.mapping, nil
+}
+
 // GetOrderMapping GET /api/server-control/order-mapping
 func GetOrderMapping(state *app.State) gin.HandlerFunc {
 	return func(c *gin.Context) {
@@ -97,7 +119,7 @@ func GetOrderMapping(state *app.State) gin.HandlerFunc {
 			// /dedicated/server 没有"未开通"语义:没有服务器时返回空数组而不是报错。
 			// 所以这里的任何错误都是真错误,原样回给前端,不要退化成 30 天窗口再报 success。
 			state.Logger.Error("获取服务器列表失败: "+err.Error(), "server_control")
-			c.JSON(http.StatusInternalServerError, gin.H{"success": false, "error": "获取服务器列表失败: " + err.Error()})
+			c.JSON(http.StatusInternalServerError, gin.H{"success": false, "error": "获取服务器列表失败: " + ovh.Explain(err)})
 			return
 		}
 		svcDetails, svcFailed, svcErr := parallelGetStringsCounted(client, serverList, func(sn string) string {
@@ -168,7 +190,7 @@ func GetOrderMapping(state *app.State) gin.HandlerFunc {
 			// 干脆不传 date.*,改成按订单号倒序回扫最近 usOrderScanLimit 个,再用订单自己的 date 本地过滤。
 			if err := client.Get("/me/order", &allOrderIDs); err != nil {
 				state.Logger.Error("获取订单列表失败: "+err.Error(), "server_control")
-				c.JSON(http.StatusInternalServerError, gin.H{"success": false, "error": "获取订单列表失败: " + err.Error()})
+				c.JSON(http.StatusInternalServerError, gin.H{"success": false, "error": "获取订单列表失败: " + ovh.Explain(err)})
 				return
 			}
 			sort.Slice(allOrderIDs, func(i, j int) bool { return allOrderIDs[i] > allOrderIDs[j] })
@@ -214,7 +236,7 @@ func GetOrderMapping(state *app.State) gin.HandlerFunc {
 			path := "/me/order?date.from=" + url.QueryEscape(dateFromStr) + "&date.to=" + url.QueryEscape(dateToStr)
 			if err := client.Get(path, &allOrderIDs); err != nil {
 				state.Logger.Error("获取订单列表失败: "+err.Error(), "server_control")
-				c.JSON(http.StatusInternalServerError, gin.H{"success": false, "error": "获取订单列表失败: " + err.Error()})
+				c.JSON(http.StatusInternalServerError, gin.H{"success": false, "error": "获取订单列表失败: " + ovh.Explain(err)})
 				return
 			}
 		}

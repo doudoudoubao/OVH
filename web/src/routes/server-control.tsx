@@ -1,5 +1,5 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { Terminal, Server, RefreshCw, Eye, EyeOff, CalendarClock, CalendarPlus, Repeat, Activity, Network, CalendarRange } from "lucide-react";
+import { Terminal, Server, RefreshCw, Eye, EyeOff, CalendarClock, Repeat, Activity, Undo2 } from "lucide-react";
 import { useEffect, useState } from "react";
 import { PageHeader } from "@/components/common/PageHeader";
 import { Card, CardContent } from "@/components/ui/card";
@@ -17,6 +17,7 @@ import {
   useServerServiceInfo,
   useServerMonitoring,
   useToggleMonitoring,
+  useRetraction,
   type OwnedServer,
   terminationLabel,
 } from "@/hooks/use-server-control";
@@ -32,10 +33,9 @@ import { OverviewTab } from "@/components/server-control/OverviewTab";
 import { PowerTab } from "@/components/server-control/PowerTab";
 import { MaintenanceTab } from "@/components/server-control/MaintenanceTab";
 import { AdvancedTab } from "@/components/server-control/AdvancedTab";
-import { NetworkSpecsDialog } from "@/components/server-control/NetworkSpecsDialog";
 import { RenewalDialog } from "@/components/server-control/RenewalDialog";
+import { RetractionDialog } from "@/components/server-control/RetractionDialog";
 import { ReinstallDialog } from "@/components/server-control/ReinstallDialog";
-import { EngagementDialog } from "@/components/server-control/EngagementDialog";
 import { toast } from "sonner";
 
 /** 服务器控制中心：顶部下拉切换服务器 + 4 tab 详情 */
@@ -150,8 +150,11 @@ function ServerControlPage() {
                 )}
               </div>
               {selected && (
+                // 只显示 IP。型号和机房左边的选择器胶囊里已经有了,
+                // 下面的硬件卡片里还有第三遍 —— 同一串信息在一屏里出现三次,
+                // 而这一行唯一独有的信息就是 IP。
                 <div className="text-[11px] sm:text-[12px] text-muted-foreground break-all sm:truncate font-mono">
-                  {selected.commercialRange} · {selected.datacenter.toUpperCase()} · {maskSensitive(selected.ip, hidden)}
+                  {maskSensitive(selected.ip, hidden)}
                 </div>
               )}
             </div>
@@ -232,7 +235,7 @@ function ServerSelector({
               <StatusDot tone={selected.state === "ok" ? "success" : "warning"} size="xs" />
               <span className="font-semibold">{maskSensitive(displayName(selected), hidden)}</span>
               <span className="text-[11px] text-muted-foreground font-sans ml-1">
-                {selected.commercialRange} · {selected.datacenter.toUpperCase()}
+                {selected.commercialRange} · {(selected.datacenter || "").toUpperCase()}
               </span>
             </div>
           )}
@@ -257,7 +260,7 @@ function ServerSelector({
               <StatusDot tone={s.state === "ok" ? "success" : "warning"} size="xs" />
               <span className="font-semibold">{maskSensitive(displayName(s), hidden)}</span>
               <span className="text-[11px] text-muted-foreground font-sans ml-1">
-                {s.commercialRange} · {s.datacenter.toUpperCase()}
+                {s.commercialRange} · {(s.datacenter || "").toUpperCase()}
               </span>
             </div>
           </SelectItem>
@@ -376,12 +379,15 @@ function RenameDialog({
 
 function ServerTabs({ server }: { server: OwnedServer }) {
   const info = useServerServiceInfo(server.serviceName);
+  // 14 天无理由撤单的资格。只有 OVH 明确说还在窗口内才会渲染入口 ——
+  // 判据是它返回的 retractionDate,不是自己算"开通不到 14 天":
+  // v0.1.24 之前下的单在结账时就弃权了,自己算会给它们显示一个必然失败的按钮。
+  const retraction = useRetraction(server.serviceName);
+  const [retractOpen, setRetractOpen] = useState(false);
   const monitoring = useServerMonitoring(server.serviceName);
   const toggleMon = useToggleMonitoring();
-  const [netSpecsOpen, setNetSpecsOpen] = useState(false);
   const [renewalOpen, setRenewalOpen] = useState(false);
   const [reinstallOpen, setReinstallOpen] = useState(false);
-  const [engagementOpen, setEngagementOpen] = useState(false);
 
   /**
    * 监控开关下发的是「取反」,取的是 monitoring.data。
@@ -426,16 +432,33 @@ function ServerTabs({ server }: { server: OwnedServer }) {
             <div className="flex flex-wrap gap-2 items-center">
               {info.data && (
                 <>
-                  <InfoPill
-                    icon={<CalendarClock className="w-3.5 h-3.5" />}
-                    label="到期"
-                    value={info.data.expiration ? new Date(info.data.expiration).toLocaleDateString("zh-CN") : "—"}
-                  />
-                  <InfoPill
-                    icon={<CalendarPlus className="w-3.5 h-3.5" />}
-                    label="开通"
-                    value={info.data.creation ? new Date(info.data.creation).toLocaleDateString("zh-CN") : "—"}
-                  />
+                  {/* 放在整行最前面,而且是唯一带强调色的一颗。
+                      这一行剩下的都是"看一眼就过"的信息(到期日、OS、续费),
+                      只有它是有硬截止时间的不可逆动作 —— 混在中间、样式又一样的话,
+                      一个 2 天后就永久消失的权利会被当成又一个日期划过去。
+
+                      过期 / 没有撤回权 / 没查到订单都不显示:
+                      一个点了必然失败的退款按钮比没有按钮更糟。 */}
+                  {retraction.data?.eligible && (
+                    <InfoPill
+                      icon={<Undo2 className="w-3.5 h-3.5" />}
+                      label="可撤单"
+                      tone="urgent"
+                      value={
+                        typeof retraction.data.hoursLeft === "number"
+                          ? retraction.data.hoursLeft >= 24
+                            ? `${Math.floor(retraction.data.hoursLeft / 24)} 天`
+                            : `${retraction.data.hoursLeft} 小时`
+                          : "窗口内"
+                      }
+                      onClick={() => setRetractOpen(true)}
+                      title={retractionWindowText(retraction.data)}
+                    />
+                  )}
+                  {/* 能点的排前面(续费改策略、OS 开重装),纯展示的排后面。
+                      以前是「到期 开通 续费 OS」混排,而它们里只有两个能点 ——
+                      (开通日后来整个去掉了)
+                      鼠标不悬停上去根本看不出来,能改的设置就这么被当成了标签。 */}
                   <InfoPill
                     icon={<Repeat className="w-3.5 h-3.5" />}
                     label="续费"
@@ -447,6 +470,17 @@ function ServerTabs({ server }: { server: OwnedServer }) {
                     label="OS"
                     value={server.os || "—"}
                     onClick={() => setReinstallOpen(true)}
+                  />
+
+                  {/* 分隔:右边全是只读日期,点了没反应 */}
+                  <span className="w-px h-4 bg-border mx-0.5" aria-hidden />
+
+                  {/* 开通日整个去掉了 —— 一年也用不到一次,占的却是和到期日一样的宽度。
+                      到期日不一样:不续费就没了,是要盯的。 */}
+                  <InfoPill
+                    icon={<CalendarClock className="w-3.5 h-3.5" />}
+                    label="到期"
+                    value={info.data.expiration ? new Date(info.data.expiration).toLocaleDateString("zh-CN") : "—"}
                   />
                 </>
               )}
@@ -486,25 +520,11 @@ function ServerTabs({ server }: { server: OwnedServer }) {
                 </TooltipContent>
               </Tooltip>
 
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <Button variant="outline" size="sm" className="h-7 rounded-full" onClick={() => setNetSpecsOpen(true)}>
-                    <Network className="w-3.5 h-3.5 mr-1" />
-                    网络规格
-                  </Button>
-                </TooltipTrigger>
-                <TooltipContent>带宽四档 + IPv4 / IPv6 路由</TooltipContent>
-              </Tooltip>
-
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <Button variant="outline" size="sm" className="h-7 rounded-full" onClick={() => setEngagementOpen(true)}>
-                    <CalendarRange className="w-3.5 h-3.5 mr-1" />
-                    合同期
-                  </Button>
-                </TooltipTrigger>
-                <TooltipContent>切换更长承诺期享受折扣 / 改到期策略</TooltipContent>
-              </Tooltip>
+              {/* 「网络规格」和「合同期」挪到了「维护」tab。
+                  它们是纯弹窗按钮 —— 没有值可显示,只是个入口,却各占 100px
+                  把这一行挤到换行(实测标签 + 胶囊需 1240px,容器只有 1230px)。
+                  而维护 tab 里本来就有「硬件更换」「变更联系人」两张同类卡片,
+                  它们属于同一类东西:偶尔打开一次的对话框,不是要瞄一眼的信息。 */}
             </div>
           )}
         </div>
@@ -523,11 +543,6 @@ function ServerTabs({ server }: { server: OwnedServer }) {
         </TabsContent>
       </Tabs>
 
-      <NetworkSpecsDialog
-        serviceName={server.serviceName}
-        open={netSpecsOpen}
-        onOpenChange={setNetSpecsOpen}
-      />
 
       {info.data && (
         <RenewalDialog
@@ -538,42 +553,71 @@ function ServerTabs({ server }: { server: OwnedServer }) {
         />
       )}
 
+      {/* 撤单对话框。只在 eligible 时才可能打开,所以这里直接用 retraction.data */}
+
+      {retraction.data?.eligible && (
+
+        <RetractionDialog
+
+          serviceName={server.serviceName}
+
+          displayName={server.serviceName}
+
+          info={retraction.data}
+
+          open={retractOpen}
+
+          onOpenChange={setRetractOpen}
+
+        />
+
+      )}
+
       <ReinstallDialog
         serviceName={server.serviceName}
         open={reinstallOpen}
         onOpenChange={setReinstallOpen}
       />
 
-      <EngagementDialog
-        serviceName={server.serviceName}
-        open={engagementOpen}
-        onOpenChange={setEngagementOpen}
-      />
     </>
   );
 }
 
 /** 紧凑胶囊:服务信息条的单元素。
  *  传 onClick → 视觉与右侧 outline 按钮(监控/网络规格)对齐:bg-background + accent hover,
- *  跟纯展示的胶囊(到期/开通/OS,bg-secondary/50)在外观上明确区分。 */
+ *  跟纯展示的胶囊(到期/OS,bg-secondary/50)在外观上明确区分。 */
 function InfoPill({
   icon,
   label,
   value,
   onClick,
+  tone,
+  title,
 }: {
   icon: React.ReactNode;
   label: string;
   value: string;
   onClick?: () => void;
+  /** 悬停说明。给那些"一个数字说不清"的胶囊用(比如撤回期要写清起止) */
+  title?: string;
+  /**
+   * urgent:有硬截止时间的不可逆动作(目前只有撤单)。
+   *
+   * 不给它单独的视觉权重的话,「可撤单 还剩 2 天」会和「到期 2026/10/7」
+   * 「到期 2026/10/7」完全等价 —— 而前者是过了就永远没有的权利,
+   * 后者只是两个日期。一排一模一样的胶囊里,用户不会注意到那个倒计时。
+   */
+  tone?: "urgent";
 }) {
   // 注意:本项目 --accent 在亮色模式被定义为近黑色(用作强调对比),不能用作 hover bg。
   // 跟旁边 Button outline 变体对齐(用 hover:bg-muted,见 button.tsx)。
   const cls = [
-    "inline-flex items-center gap-1.5 h-7 pl-2.5 pr-3 rounded-full border text-[12px]",
-    onClick
-      ? "border-border bg-background hover:bg-muted cursor-pointer transition-colors shadow-sm"
-      : "border-border bg-secondary/50",
+    "inline-flex items-center gap-1.5 h-7 pl-2 pr-2.5 rounded-full border text-[12px] whitespace-nowrap",
+    tone === "urgent"
+      ? "border-warning/50 bg-warning/10 hover:bg-warning/20 cursor-pointer transition-colors shadow-sm"
+      : onClick
+        ? "border-border bg-background hover:bg-muted cursor-pointer transition-colors shadow-sm"
+        : "border-border bg-secondary/50",
   ].join(" ");
   const inner = (
     <>
@@ -586,12 +630,28 @@ function InfoPill({
   );
   if (onClick) {
     return (
-      <button type="button" onClick={onClick} className={cls}>
+      <button type="button" onClick={onClick} className={cls} title={title}>
         {inner}
       </button>
     );
   }
-  return <div className={cls}>{inner}</div>;
+  return <div className={cls} title={title}>{inner}</div>;
+}
+
+/**
+ * 撤回期的悬停说明:把起止都写出来。
+ *
+ * 只显示"还剩 N 天"的话没法自查 —— 用户会拿它去对「开通日 + 14 天」,
+ * 对不上就以为程序算错了。而撤回期是从**下单**起算的,机器常常下单后
+ * 几天才交付,两个日期差好几天,对不上才是正常的。
+ */
+function retractionWindowText(r: { orderDate?: string; retractionDate?: string }): string {
+  const fmt = (v?: string) => (v ? new Date(v).toLocaleString("zh-CN") : "");
+  const end = fmt(r.retractionDate);
+  const start = fmt(r.orderDate);
+  if (!end) return "在撤回期内";
+  if (!start) return `撤回期截止 ${end}（OVH 给的日期）`;
+  return `撤回期 ${start} → ${end}\n从下单起算，不是从服务器开通起算`;
 }
 
 /** 续费状态友好文案。OVH 在 manager 后台标的 "Cancellation scheduled"

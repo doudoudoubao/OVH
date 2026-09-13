@@ -3,13 +3,16 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"io/fs"
 	"log/slog"
 	"net"
 	"net/http"
 	"os"
+	"os/signal"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/gin-contrib/cors"
@@ -330,6 +333,9 @@ func main() {
 
 		// Server control - basic
 		sc := api.Group("/server-control")
+		// :service_name 会被直接拼进 OVH 的请求路径,先在组上统一挡一道 ——
+		// 名字里带 # 或 ? 会让请求被静默发到另一个端点,见 ValidateServiceName
+		sc.Use(handlers.ValidateServiceName())
 		{
 			sc.GET("/list", handlers.ListMyServers(state))
 			// 服务器本地别名:纯本地显示用,不下发 OVH
@@ -337,6 +343,10 @@ func main() {
 			sc.PUT("/:service_name/alias", handlers.SetServerAlias(state))
 			sc.DELETE("/:service_name/alias", handlers.DeleteServerAlias(state))
 			sc.GET("/order-mapping", handlers.GetOrderMapping(state))
+			// 14 天无理由撤单:GET 判断这台机器还能不能退(依据 OVH 的 retractionDate,
+			// 不是自己算 14 天),POST 真正提交申请(不可逆,要求 confirm:true)
+			sc.GET("/:service_name/retraction", handlers.GetRetraction(state))
+			sc.POST("/:service_name/retraction", handlers.PostRetraction(state))
 			sc.POST("/:service_name/reboot", handlers.Reboot(state))
 			sc.GET("/:service_name/templates", handlers.GetOSTemplates(state))
 			sc.POST("/:service_name/install", handlers.InstallOS(state))
@@ -346,6 +356,11 @@ func main() {
 			sc.POST("/:service_name/tasks/:task_id/schedule", handlers.ScheduleTaskTimeslot(state))
 
 			// boot/monitoring
+			// 一键救援:改 netboot → 设收信邮箱 → 重启,三步合一。
+			// 手动做要在 OVH 后台点四步,而漏掉最后的重启是最常见的错误。
+			sc.GET("/:service_name/rescue", handlers.GetRescueStatus(state))
+			sc.POST("/:service_name/rescue", handlers.EnterRescue(state))
+			sc.POST("/:service_name/rescue/exit", handlers.ExitRescue(state))
 			sc.GET("/:service_name/boot", handlers.GetBootConfig(state))
 			sc.PUT("/:service_name/boot/:boot_id", handlers.SetBootConfig(state))
 			sc.GET("/:service_name/monitoring", handlers.GetMonitoringStatus(state))
@@ -458,6 +473,9 @@ func main() {
 
 		// VPS control(已购 VPS 管理)
 		vc := api.Group("/vps-control")
+		// :service_name 会被直接拼进 OVH 的请求路径,先在组上统一挡一道 ——
+		// 名字里带 # 或 ? 会让请求被静默发到另一个端点,见 ValidateServiceName
+		vc.Use(handlers.ValidateServiceName())
 		{
 			vc.GET("/list", handlers.ListVps(state))
 			vc.GET("/:service_name/info", handlers.GetVpsInfo(state))
@@ -677,6 +695,43 @@ func main() {
 		}
 	}
 
+	// —— 优雅退出 ——
+	//
+	// Docker 停/重建容器(compose down、compose up -d 拉新镜像、重启策略)发的是
+	// SIGTERM,而 Go 默认收到它就当场终止:defer 不会执行,于是
+	//   - sqliteDB.Close() 不跑
+	//   - Logger 是内存缓冲的,没落盘的那批日志直接丢(排查问题时最需要的恰恰是最后几条)
+	//   - 在途请求被硬切断,包括已经走到结账那几秒的下单
+	// 而"拉新镜像重建"是这个项目最常见的运维动作,不该每次都这么收场。
+	//
+	// 自更新有它自己的收尾路径(gracefulRestart),两者不能同时跑 ——
+	// 靠 restartPending 区分。
+	shutdownDone := make(chan struct{})
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		sig := <-sigCh
+		// Shutdown 会让 Serve 立刻返回,而收尾还在那条 goroutine 里跑。
+		// main 直接返回 = 进程退出,数据库可能还没关完 —— 和不处理信号没区别。
+		if shutdownPending.Load() {
+			select {
+			case <-shutdownDone:
+			case <-time.After(30 * time.Second):
+				console.Warn("shutdown", "err", "收尾超过 30 秒,强制退出")
+			}
+			state.Logger.Flush()
+			os.Exit(0)
+		}
+
+		if restartPending.Load() {
+			return // 自更新已经在收尾,别插一脚
+		}
+		shutdownPending.Store(true)
+		console.Info("shutdown", "signal", sig.String())
+		gracefulShutdown(srv, sqliteDB, state.Logger, console, sig.String(), 15*time.Second)
+		close(shutdownDone)
+	}()
+
 	if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
 		console.Error("server run", "err", err)
 		os.Exit(1)
@@ -702,6 +757,47 @@ func main() {
 
 // restartPending 标记"这次 Serve 退出是自更新计划内的"。
 var restartPending atomic.Bool
+
+// gracefulShutdown 退出前的收尾:停止接受新请求 → 等在途请求收尾 → 日志落盘 → 关数据库。
+//
+// 抽成独立函数是为了能测:这里真正要保证的是两件**可观察**的事 ——
+// 缓冲区里的日志写进了文件、数据库正常关闭。这两件在收到 SIGTERM 时
+// 原本一件都不会发生(Go 默认当场终止,defer 不执行)。
+//
+// 顺序不能反:先 Flush 再 Close。日志写的是文件不是库,但把"正在关库"
+// 这句留到关完再刷,万一 Close 卡住,最有用的那条线索就丢了。
+func gracefulShutdown(srv *http.Server, sqlDB io.Closer, lg *logger.Logger, console *slog.Logger, reason string, wait time.Duration) {
+	lg.Info("收到 "+reason+",正在优雅退出", "system")
+
+	// 给在途请求留出收尾时间。抢购链路最长的一步是结账,实测几秒级;
+	// 超时也要继续往下走,不能因为一个卡住的请求把整个退出流程拖死。
+	ctx, cancel := context.WithTimeout(context.Background(), wait)
+	defer cancel()
+	if srv != nil {
+		if err := srv.Shutdown(ctx); err != nil {
+			if console != nil {
+				console.Warn("shutdown", "err", err)
+			}
+			lg.Warn("优雅退出:仍有请求未在期限内收尾,继续关闭 - "+err.Error(), "system")
+		}
+	}
+	lg.Info("优雅退出:请求已收尾,正在关闭数据库", "system")
+	lg.Flush()
+	if sqlDB != nil {
+		if err := sqlDB.Close(); err != nil {
+			if console != nil {
+				console.Warn("close sqlite", "err", err)
+			}
+			lg.Error("关闭数据库失败: "+err.Error(), "system")
+			lg.Flush()
+		}
+	}
+}
+
+// shutdownPending 标记"这次 Serve 退出是收到退出信号后计划内的"。
+// 和 restartPending 分开:两条路径的收尾动作不同(一个要 exec,一个要退出),
+// 共用一个标记会让自更新在收到 SIGTERM 时走错分支。
+var shutdownPending atomic.Bool
 
 // listenWithRetry 绑端口,短暂重试。
 //

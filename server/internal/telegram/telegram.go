@@ -11,9 +11,10 @@ import (
 	"strings"
 	"sync"
 	"time"
-	"unicode"
 
 	"github.com/ovh-buy/server/internal/app"
+
+	"github.com/ovh-buy/server/internal/types"
 )
 
 // VerifyConfig 检查 Telegram 是否可用:Token / Chat ID 是否填写 + bot 是否能 getMe + chat 是否可访问。
@@ -98,9 +99,15 @@ func SendMessage(state *app.State, message string, replyMarkup map[string]interf
 		return false
 	}
 
-	state.Logger.Info(fmt.Sprintf("准备发送Telegram消息，ChatID: %s, TokenLength: %d", cfg.TgChatID, len(cfg.TgToken)), "")
+	// 超 4096 字符 Telegram 直接 400,整条消息丢掉 —— 而走这条路的是补货通知
+	// 和抢购结果,恰恰是最不能丢的。截断后至少把前 4095 个字送到。
+	// 按字符截不按字节:按字节切会把中文劈成半个字,发出去是乱码。
+	if n := len([]rune(message)); n > MaxMessageRunes {
+		state.Logger.Warn(fmt.Sprintf("Telegram 消息 %d 字符超过 %d 上限,已截断发送",
+			n, MaxMessageRunes), "telegram")
+		message = truncateRunes(message, MaxMessageRunes)
+	}
 
-	url := "https://api.telegram.org/bot" + cfg.TgToken + "/sendMessage"
 	payload := map[string]interface{}{
 		"chat_id": cfg.TgChatID,
 		"text":    message,
@@ -109,36 +116,14 @@ func SendMessage(state *app.State, message string, replyMarkup map[string]interf
 		payload["reply_markup"] = replyMarkup
 	}
 
-	body, _ := json.Marshal(payload)
-
-	// 不能截断了事:"https://api.telegram.org/bot" 就占 28 字符,
-	// 取前 45 位等于每发一条消息就把 Token 前 17 位记进日志。
-	state.Logger.Info("发送HTTP请求到Telegram API: "+scrub(url), "")
-
-	client := &http.Client{Timeout: 10 * time.Second}
-	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(body))
-	if err != nil {
-		state.Logger.Error("发送Telegram消息时发生未预期错误: "+scrub(err.Error()), "")
+	if _, err := call(state, cfg.TgToken, "sendMessage", payload, 10*time.Second); err != nil {
+		// 这里必须是 Error:补货通知发不出去 = 用户错过这一波货,
+		// 而他不会知道曾经有过货
+		state.Logger.Error("发送 Telegram 消息失败: "+err.Error(), "telegram")
 		return false
 	}
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := client.Do(req)
-	if err != nil {
-		state.Logger.Error("发送Telegram消息时发生网络错误: "+scrub(err.Error()), "")
-		return false
-	}
-	defer resp.Body.Close()
-
-	state.Logger.Info(fmt.Sprintf("Telegram API响应: 状态码=%d", resp.StatusCode), "")
-
-	respBody, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode == http.StatusOK {
-		state.Logger.Info("Telegram响应数据: "+string(respBody), "")
-		state.Logger.Info("成功发送消息到Telegram", "")
-		return true
-	}
-	state.Logger.Error(fmt.Sprintf("发送消息到Telegram失败: 状态码=%d, 响应=%s", resp.StatusCode, string(respBody)), "")
-	return false
+	state.Logger.Info("成功发送消息到 Telegram", "telegram")
+	return true
 }
 
 // AnswerCallback 应答 callback_query
@@ -147,43 +132,40 @@ func AnswerCallback(state *app.State, callbackQueryID, text string, showAlert bo
 	if cfg.TgToken == "" {
 		return
 	}
-	payload := map[string]interface{}{
+	// 官方限 0-200 字符,超了整个 answerCallbackQuery 被拒 ——
+	// 表现是用户点了按钮、转圈半天没有任何提示,而按钮其实已经生效了。
+	_, err := call(state, cfg.TgToken, "answerCallbackQuery", map[string]interface{}{
 		"callback_query_id": callbackQueryID,
-		"text":              text,
+		"text":              truncateRunes(text, MaxCallbackAnswerRunes),
 		"show_alert":        showAlert,
-	}
-	body, _ := json.Marshal(payload)
-	client := &http.Client{Timeout: 5 * time.Second}
-	req, _ := http.NewRequest(http.MethodPost,
-		"https://api.telegram.org/bot"+cfg.TgToken+"/answerCallbackQuery",
-		bytes.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := client.Do(req)
-	if err == nil {
-		resp.Body.Close()
+	}, 5*time.Second)
+	if err != nil {
+		// Debug 而不是 Warn:回调应答只是个气泡提示,失败不影响按钮本身的效果。
+		// 但必须留痕 —— 以前这里完全静默,"点了没反应"根本无从查起。
+		state.Logger.Debug("回应 Telegram 按钮点击失败: "+err.Error(), "telegram")
 	}
 }
 
-// SendReply 回复指定消息
+// SendReply 回复指定消息。
+//
+// 这是所有 /命令 回复的主路径。以前它是 `if err == nil { resp.Body.Close() }` ——
+// 网络错误和 Telegram 的 ok:false 全吞掉:用户发了 /queue 收不到任何东西,
+// 而日志里一个字都没有,没法排查。
 func SendReply(state *app.State, chatID interface{}, text string, replyToMessageID int64) {
 	cfg := state.Config.Get()
 	if cfg.TgToken == "" {
 		return
 	}
-	payload := map[string]interface{}{
+	// 超 4096 字符 Telegram 直接 400,整条消息丢掉。截断后至少把前 4095 个字送到,
+	// 而不是让用户什么都收不到。
+	text = truncateRunes(text, MaxMessageRunes)
+	_, err := call(state, cfg.TgToken, "sendMessage", map[string]interface{}{
 		"chat_id":             chatID,
 		"text":                text,
 		"reply_to_message_id": replyToMessageID,
-	}
-	body, _ := json.Marshal(payload)
-	client := &http.Client{Timeout: 10 * time.Second}
-	req, _ := http.NewRequest(http.MethodPost,
-		"https://api.telegram.org/bot"+cfg.TgToken+"/sendMessage",
-		bytes.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := client.Do(req)
-	if err == nil {
-		resp.Body.Close()
+	}, 10*time.Second)
+	if err != nil {
+		state.Logger.Warn("回复 Telegram 消息失败: "+err.Error(), "telegram")
 	}
 }
 
@@ -203,7 +185,25 @@ type OrderInfo struct {
 	Options  []string
 }
 
-// 格式: plancode [datacenter] [quantity] [options(逗号分隔)]
+// 格式: <planCode> [机房] [数量] [配置...]
+//
+// 除 planCode 必须打头外,后面的部分**位置无关**,按形状认:
+//
+//	@xxx    → 账户(任意位置,手机上很容易顺手打在末尾)
+//	纯数字   → 数量
+//	3~4 字母 → 机房(不区分大小写,统一转小写)
+//	其余     → 配置(addon planCode),逗号或空格分隔都认
+//
+// 以前这里是按**位置**猜的:先找带逗号的词当 options,剩下的按
+// switch len(remaining) 分 case 1 / case 2。三种常见写法全都静默失效:
+//
+//	24ska01 gra softraid-2x960ssd     配置没逗号 → 配置被丢掉
+//	24ska01 gra 2 softraid-2x960ssd   剩 3 个词 → switch 没有 case 3,
+//	                                  机房、数量、配置**全部**丢掉
+//	24ska01 GRA 2                     机房要求全小写 → 机房和数量都丢掉
+//
+// 而丢掉是没有任何报错的:任务照样建,用户拿到的是基础配置的机器。
+// 这正是"TG 上下单总是无法选择配置"的来源。
 func ParseOrderMessage(text string) *OrderInfo {
 	text = strings.TrimSpace(text)
 	if text == "" {
@@ -217,82 +217,114 @@ func ParseOrderMessage(text string) *OrderInfo {
 		PlanCode: parts[0],
 		Quantity: 1,
 	}
-	remaining := []string{}
-	if len(parts) > 1 {
-		remaining = parts[1:]
-	}
-	// 先把 @账户 摘出来,它可以出现在任何位置 ——
-	// 手机上打字容易顺手打在末尾,而末尾正好是 options 的地盘。
-	// 摘早一点,下面的机房/数量/配置解析就完全不用知道它的存在。
-	kept := remaining[:0]
-	for _, p := range remaining {
-		if strings.HasPrefix(p, "@") && len(p) > 1 {
-			if result.AccountRef == "" {
-				result.AccountRef = strings.ToLower(p[1:])
-			}
-			continue
-		}
-		kept = append(kept, p)
-	}
-	remaining = kept
-	if len(remaining) == 0 {
+	if len(parts) == 1 {
 		return result
 	}
 
-	// 找包含逗号的部分 = options
-	optionsStart := -1
-	for i, p := range remaining {
-		if strings.Contains(p, ",") {
-			optionsStart = i
-			break
-		}
-	}
-	if optionsStart >= 0 {
-		optsText := strings.Join(remaining[optionsStart:], " ")
-		for _, o := range strings.Split(optsText, ",") {
-			o = strings.TrimSpace(o)
-			if o != "" {
-				result.Options = append(result.Options, o)
-			}
-		}
-		remaining = remaining[:optionsStart]
+	addOption := func(s string) {
+		// 逗号分隔和空格分隔都认,混用也认。
+		// 走 types.SplitList 是为了认全角逗号 —— 中文输入法默认打出来的是「，」,
+		// 只切半角的话 `ram-64g，softraid-2x960ssd` 会变成**一个**配置项,
+		// 匹配不上任何 addon,而且不报错:单照下,只是配置悄悄没了。
+		result.Options = append(result.Options, types.SplitList(s)...)
 	}
 
-	switch len(remaining) {
-	case 1:
-		p := remaining[0]
-		if n, ok := parsePositiveInt(p); ok {
-			result.Quantity = clampQuantity(n)
-		} else if len(p) >= 3 && len(p) <= 4 && isAllLowerAlpha(p) {
-			result.Datacenter = p
-		}
-	case 2:
-		p1, p2 := remaining[0], remaining[1]
-		if len(p1) >= 3 && len(p1) <= 4 && isAllLowerAlpha(p1) {
-			result.Datacenter = p1
-			if n, ok := parsePositiveInt(p2); ok {
-				result.Quantity = clampQuantity(n)
+	qtySet := false
+	for _, p := range parts[1:] {
+		switch {
+		case strings.HasPrefix(p, "@"):
+			// 账户。裸 @ 是打漏了,直接丢 —— 它不是配置项,
+			// 当配置发给 OVH 只会换来一个看不懂的 400。
+			if len(p) > 1 && result.AccountRef == "" {
+				result.AccountRef = strings.ToLower(p[1:])
 			}
-		} else if n, ok := parsePositiveInt(p1); ok {
+		case !qtySet && isPositiveInt(p):
+			// 只认第一个纯数字。第二个数字多半是配置里的型号
+			// (比如手滑把 "2 960" 打成两个词),当数量会把数量改错。
+			n, _ := parsePositiveInt(p)
 			result.Quantity = clampQuantity(n)
-			if len(p2) >= 3 && len(p2) <= 4 && isAllLowerAlpha(p2) {
-				result.Datacenter = p2
-			}
+			qtySet = true
+		case result.Datacenter == "" && isDatacenterCode(p):
+			// OVH 独服机房码都是 3~4 个纯字母(gra/rbx/sbg/bhs/waw/eri/sgp…),
+			// 而 addon planCode 一律带连字符和数字(ram-64g-noecc-2133、
+			// softraid-2x960ssd),两者不会撞。
+			result.Datacenter = strings.ToLower(p)
+		case isMalformedQuantity(p):
+			// 写成 -1 / +2 / 3.5 这种:意图显然是数量,只是写得不合法。
+			// 丢给 addOption 会把 "-1" 当成 addon planCode 发给 OVH,
+			// 换回一句用户看不懂的英文报错。数量有默认值,忽略即可。
+			//
+			// 注意只挡带符号/小数点的写法。裸的正整数(比如 "24ska01 gra 2 960"
+			// 里的 960)照旧进 options —— 它多半是配置项被空格打断了,
+			// 留在 options 里用户能在下单确认那条消息里看见,丢掉就永远不知道。
+		default:
+			addOption(p)
 		}
 	}
 	return result
 }
 
+// isDatacenterCode 长得像机房码:3~4 个 ASCII 字母,不区分大小写。
+// 只判形状不查词表 —— OVH 随时开新机房,写死一张表就意味着
+// 每开一个机房都要发版,而中间那段时间用户的 /buy 会静默丢掉机房。
+func isDatacenterCode(s string) bool {
+	if len(s) < 3 || len(s) > 4 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if (c < 'a' || c > 'z') && (c < 'A' || c > 'Z') {
+			return false
+		}
+	}
+	return true
+}
+
+// isPositiveInt 纯十进制 ASCII 数字
+func isPositiveInt(s string) bool {
+	_, ok := parsePositiveInt(s)
+	return ok
+}
+
+// isMalformedQuantity 带符号或带小数点的数字,比如 -1 / +2 / 3.5。
+// 这种写法只可能是在写数量(addon planCode 不长这样),只是写得不合法。
+// 裸的正整数不算 —— 那个由调用方按位置决定是数量还是配置。
+func isMalformedQuantity(s string) bool {
+	if s == "" {
+		return false
+	}
+	signed := s[0] == '+' || s[0] == '-'
+	if signed {
+		s = s[1:]
+	}
+	if s == "" {
+		return false
+	}
+	dot := false
+	digits := false
+	for i := 0; i < len(s); i++ {
+		switch c := s[i]; {
+		case c >= '0' && c <= '9':
+			digits = true
+		case c == '.':
+			dot = true
+		default:
+			return false
+		}
+	}
+	return digits && (signed || dot)
+}
+
 // parsePositiveInt 只接受纯十进制 ASCII 数字字符串，
 // 不接受 "-1" / "+5" / " 3" 等带符号或空白的版本（strconv.Atoi 会通过）。
-// MaxOrderQuantity 一条聊天消息能指定的最大数量。
-// 没有上限时 "planCode 4000000000" 会让 order_processor 先把 40 亿个
-// QueueItem append 进一个切片 —— 进程当场 OOM 被杀。
-const MaxOrderQuantity = 20
-
-// MaxOrderFanout 一条消息最多创建多少个抢购任务。
-// 不指定机房时任务数 = 配置数 × 有货机房数 × 数量,很容易远超用户直觉。
-const MaxOrderFanout = 60
+// MaxOrderQuantity / MaxOrderFanout 下单规模上限。
+// 定义挪到了 types —— 它们是产品级约束,不是 TG 专有的:
+// 网页端那条入队路径原来完全没有上界(见 types 里的说明)。
+// 这里留别名,TG 侧的引用不用改。
+const (
+	MaxOrderQuantity = types.MaxOrderQuantity
+	MaxOrderFanout   = types.MaxOrderFanout
+)
 
 // clampQuantity 把数量夹到 [1, MaxOrderQuantity]
 func clampQuantity(n int) int {
@@ -319,15 +351,6 @@ func parsePositiveInt(s string) (int, bool) {
 		return 0, false
 	}
 	return n, true
-}
-
-func isAllLowerAlpha(s string) bool {
-	for _, r := range s {
-		if !unicode.IsLetter(r) || !unicode.IsLower(r) {
-			return false
-		}
-	}
-	return len(s) > 0
 }
 
 func min(a, b int) int {

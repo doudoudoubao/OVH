@@ -46,6 +46,7 @@ import { OVH_SUBSIDIARIES } from "@/lib/ovh-subsidiaries";
 import { formatMoney, CURRENCY_UNKNOWN_HINT } from "@/lib/money";
 import { useAccounts, findAccountByID } from "@/hooks/use-accounts";
 import { endpointRegion, regionLabel } from "@/lib/ovh-regions";
+import { clampOrderPlan, MAX_ORDER_QUANTITY, MAX_ORDER_FANOUT } from "@/lib/order-limits";
 
 /** 服务器列表：卡片网格 + 详情弹窗 */
 export const Route = createFileRoute("/servers")({
@@ -149,7 +150,7 @@ function ServersPage() {
         title="服务器列表"
         description="目录、价格、可用性全部走访问触发的缓存，2 小时内复用"
         action={
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center justify-end gap-2">
             <CacheBadge />
             <Button
               variant="outline"
@@ -511,8 +512,11 @@ function DetailContent({
   const [autoPay, setAutoPay] = useState(false);
   const toggleDC = (code: string) =>
     setSelectedDCs((prev) => (prev.includes(code) ? prev.filter((c) => c !== code) : [...prev, code]));
-  const qty = Math.max(1, Number(quantity) || 1);
-  const totalTasks = selectedDCs.length * qty;
+  // 和后端同一套上限:界面上先把数量收住,别让用户看到一个建不出来的数字。
+  // 真正的闸门在后端 EnqueueItems,这里只是提前说清楚。
+  const orderPlan = clampOrderPlan(selectedDCs.length, Number(quantity) || 1);
+  const qty = orderPlan.quantity;
+  const totalTasks = orderPlan.total;
   // 静态可用性兜底：实时还没返回时也能看到目录里的初始数据
   const staticDcMap = useMemo(() => {
     const m: Record<string, string> = {};
@@ -771,13 +775,22 @@ function DetailContent({
             </div>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
               <div>
-                <label className="block text-[11px] text-muted-foreground mb-1">每个数据中心数量</label>
+                <label className="block text-[11px] text-muted-foreground mb-1">
+                  每个数据中心数量<span className="ml-1 opacity-60">最多 {MAX_ORDER_QUANTITY}</span>
+                </label>
                 <Input
                   type="number"
                   min={1}
+                  max={MAX_ORDER_QUANTITY}
                   value={quantity}
                   onChange={(e) => setQuantity(e.target.value)}
                 />
+                {orderPlan.clamped && (
+                  // 光靠 max= 挡不住手打的值,得把实际会用的数字说出来
+                  <p className="text-[11px] text-amber-600 dark:text-amber-500 mt-1">
+                    已按 {qty} 台/机房计算（单次最多 {MAX_ORDER_FANOUT} 个任务）
+                  </p>
+                )}
               </div>
               <div>
                 <label className="block text-[11px] text-muted-foreground mb-1">重试间隔（秒）</label>
@@ -799,12 +812,14 @@ function DetailContent({
             ? `将创建 ${totalTasks} 个任务（${selectedDCs.length} DC × ${qty}）${selectedValues.length > 0 ? ` · ${selectedValues.length} 项选配` : ""}`
             : "请选数据中心"}
           {selectedDCs.length > 0 && (
-            // 下单 checkout 带 waiveRetractationPeriod:true —— 替用户放弃了
-            // 欧区 14 天法定撤销权(抢购要立即开通,这是常规做法),但必须让用户知情
+            // 这里以前写着"下单即放弃 14 天撤销期" —— 那是 checkout 硬传
+            // waiveRetractationPeriod:true 时代的说明。那个参数已经删了
+            // (schema 里 required:false,不传就是不弃权),撤回权现在是保留的,
+            // 机器控制页还专门有撤单入口。留着这句话会让用户以为退不了。
             <span className="block text-[11px] mt-0.5">
               {autoPay
-                ? "下单后将用 OVH 默认支付方式自动付款；下单即放弃 14 天撤销期"
-                : "下单成功后需自行付款；下单即放弃 14 天撤销期（立即开通）"}
+                ? "下单后将用 OVH 默认支付方式自动付款"
+                : "下单成功后需自行付款"}
             </span>
           )}
           {selectedDCs.length > 0 && (
@@ -823,7 +838,17 @@ function DetailContent({
           onClick={() =>
             addMon.mutate({
               planCode: server.planCode,
-              datacenters: dialogDCs.map((dc) => dc.code),
+              // 跟着用户在上面勾的机房走。以前这里固定传 dialogDCs(全部机房),
+              // 用户勾了 GRA 却会收到所有机房的补货通知。
+              // 一个都没勾才按"监控所有"处理 —— 那是明确的空选。
+              datacenters:
+                selectedDCs.length > 0 ? selectedDCs : dialogDCs.map((dc) => dc.code),
+              // 选配也要带上。订阅本身是支持 options 的(后端 AddSubscription
+              // 有这个字段),漏传的后果是:用户特意选了 64G 内存 + 2x960 SSD,
+              // 加进监控后盯的却是这个 planCode 底下的**所有**配置组合 ——
+              // 通知按每套配置逐套触发,之后若在监控页打开自动下单,
+              // 抢到的会是基础配置那台。
+              options: selectedValues,
               serverName: server.name,
             })
           }
