@@ -190,7 +190,20 @@ export function ChangeContactDialog({
               将"{tokenTarget?.mode === "accept" ? "接受" : "拒绝"}"该变更请求。请粘贴 OVH 邮件中的确认 token。
             </DialogDescription>
           </DialogHeader>
-          <Input value={token} onChange={(e) => setToken(e.target.value)} placeholder="邮件中的 token 字符串" />
+          <Input
+            value={token}
+            onChange={(e) => setToken(e.target.value)}
+            placeholder="邮件中的 token 字符串"
+            autoComplete="off"
+            spellCheck={false}
+          />
+          {/* 这个 token 和 API 密钥长得像但完全是两回事,写清楚省得用户去翻 .env。
+              过期/用过都会失败,而列表里正好有「重发邮件」,直接指过去。 */}
+          <p className="text-[11px] text-muted-foreground">
+            这是 OVH 发到<b>联系人邮箱</b>里的一次性确认令牌，不是你的 API 密钥。
+            过期或已经用过都会提示 <code className="px-1 bg-muted rounded">Invalid token</code> ——
+            这时回列表点「重发邮件」拿一封新的再试。
+          </p>
           <DialogFooter>
             <Button variant="outline" onClick={() => setTokenTarget(null)}>
               取消

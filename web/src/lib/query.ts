@@ -73,6 +73,7 @@ export const qk = {
     list: (accountId: string) => ["server-control", "list", accountId] as const,
     hardware: (serviceName: string) => ["server-control", "hardware", serviceName] as const,
     rescue: (serviceName: string) => ["server-control", "rescue", serviceName] as const,
+    spla: (serviceName: string) => ["server-control", "spla", serviceName] as const,
     serviceInfo: (serviceName: string) => ["server-control", "service-info", serviceName] as const,
     ips: (serviceName: string) => ["server-control", "ips", serviceName] as const,
     interventions: (serviceName: string) => ["server-control", "interventions", serviceName] as const,

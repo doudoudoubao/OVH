@@ -57,22 +57,41 @@ func Explain(err error) string {
 	return out
 }
 
-// hintFor 按状态码 + 错误类给一句"该怎么办"。
+// hintFor 给一句"该怎么办"。
+//
+// **顺序很要紧:先看 OVH 原文,再看状态码。**
+// 反过来做会出事 —— 实测 POST /me/task/contactChange/{id}/accept 的 token 填错时,
+// OVH 回的是 403 + "Invalid token"。按状态码硬猜就会告诉用户
+// 「consumer key 权限规则没覆盖这个接口」,把人指去重建 API 凭据,
+// 而真正该做的是回邮件里把确认令牌抄对(或点重发邮件拿一封新的)。
+// 状态码只说"哪一类拒绝",原文才说"具体哪件事",原文能认出来时以原文为准。
 func hintFor(e *ovhsdk.APIError) string {
 	lower := strings.ToLower(e.Message)
+
+	// —— 先按原文认。这些说法的含义与状态码无关 ——
+	switch {
+	case strings.Contains(lower, "invalid token"), strings.Contains(lower, "token is invalid"):
+		return "这里的 token 不是 API 密钥,而是 OVH **发到邮箱里**的一次性确认令牌。" +
+			"它填错、过期或已经用过都会这样 —— 回邮件重新抄一遍,或让 OVH 重发一封"
+	case strings.Contains(lower, "not been granted"), strings.Contains(lower, "not granted"):
+		return "这个 consumer key 没有调用该接口的权限。生成 key 时的权限规则要覆盖用到的路径" +
+			"(最省事的是 GET/POST/PUT/DELETE 各给一条 /*),改完要重新授权"
+	case strings.Contains(lower, "expired"):
+		return "凭据或令牌已过期,需要重新生成"
+	}
+
 	switch e.Code {
 	case 401:
 		return "账户凭据无效或已过期。去「账户」页把这个账户的 consumer key 重新生成一次," +
 			"并**点开 OVH 返回的授权链接确认**——没点这一步的 key 是不能用的"
 	case 403:
-		if strings.Contains(lower, "not been granted") || strings.Contains(lower, "granted") {
-			return "这个 consumer key 没有调用该接口的权限。生成 key 时的权限规则要覆盖用到的路径" +
-				"(最省事的是 GET/POST/PUT/DELETE 各给一条 /*),改完要重新授权"
-		}
 		if strings.Contains(lower, "ip") {
 			return "OVH 拒绝了来自当前 IP 的调用。建 key 时如果限制过 IP,换网络或代理后就会被挡"
 		}
-		return "OVH 拒绝了这次调用(权限不足)。多半是 consumer key 的权限规则没覆盖这个接口"
+		// 走到这里说明原文没给出可识别的原因。不要断言"就是权限不足" ——
+		// OVH 的 403 也用来表示令牌无效、状态不允许等等,断言错了会把人带偏。
+		return "OVH 拒绝了这次操作,具体原因看下面的原文。" +
+			"如果原文看不出名堂,常见的一种是 consumer key 的权限规则没覆盖这个接口"
 	case 404:
 		return "OVH 说这个资源不存在。最常见的原因是**选错了账户**——" +
 			"EU / US / CA 三个站点各自独立,在 A 账户下查 B 账户的服务器一律是 404"

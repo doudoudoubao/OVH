@@ -1552,3 +1552,47 @@ export function useExitRescue(serviceName: string) {
     onError: (e: any) => toast.error(e.response?.data?.error || "退出救援模式失败"),
   });
 }
+
+// ───────────────────────────────── SPLA 许可证 ─────────────────────────────────
+
+/** dedicated.server.spla —— schema 字段:id / lastUpdate / serialNumber / status / type */
+export interface SplaLicense {
+  id: number;
+  type: string;   // SplaTypeEnum: os | sqlstd | sqlweb
+  status: string; // SplaStatusEnum: used | waitingToCheck | terminated
+  serialNumber?: string;
+  lastUpdate?: string;
+}
+export interface SplaListResult {
+  list: SplaLicense[];
+  /** 详情部分拉失败:这时不能断言"没有 os 授权",可能只是没查到 */
+  partial: boolean;
+}
+
+export function useSplaList(serviceName: string | null, enabled = true) {
+  return useQuery({
+    queryKey: qk.serverControl.spla(serviceName || ""),
+    queryFn: async (): Promise<SplaListResult> => {
+      const d = (await api.get(`/server-control/${serviceName}/spla`)).data;
+      return {
+        list: Array.isArray(d?.splaList) ? d.splaList : [],
+        partial: d?.partial === true,
+      };
+    },
+    enabled: !!serviceName && enabled,
+    staleTime: 60_000,
+  });
+}
+
+/**
+ * 某一类 SPLA 授权是不是已经登记且有效。
+ *
+ * SplaStatusEnum 只有 used / waitingToCheck / terminated 三个值。
+ * waitingToCheck 也算数 —— OVH 还在核,但记录已经建上了,重复提交没有意义。
+ */
+export function hasActiveSpla(r: SplaListResult | undefined, type: string): boolean {
+  if (!r) return false;
+  return r.list.some(
+    (x) => x.type === type && String(x.status || "").toLowerCase() !== "terminated"
+  );
+}

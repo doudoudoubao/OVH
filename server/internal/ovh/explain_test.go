@@ -66,3 +66,52 @@ func TestExplainUnwrapsWrappedAPIError(t *testing.T) {
 		t.Errorf("包装后认不出 APIError 了: %s", got)
 	}
 }
+
+// 回归:403 + "Invalid token" 不能说成权限问题。
+//
+// 实测线上报错(v0.1.32):接受联系人变更请求时 token 填错,OVH 回
+//
+//	403 Invalid token (X-OVH-Query-Id: EU.ext-5.6aa6687d...)
+//
+// 而 Explain 按状态码硬猜,输出「多半是 consumer key 的权限规则没覆盖这个接口」——
+// 把用户指去重建 API 凭据,而真正该做的是回邮件把确认令牌抄对。
+//
+// schema 里这个接口的 body 参数写得很清楚:
+//
+//	token: "The token you received by email for this request"
+//
+// 也就是说这个 token 跟 API 凭据毫无关系。
+func TestExplainDoesNotBlamePermissionsForInvalidToken(t *testing.T) {
+	got := Explain(&ovhsdk.APIError{
+		Code: 403, Class: "Client::Forbidden", Message: "Invalid token",
+		QueryID: "EU.ext-5.6aa6687d",
+	})
+	if strings.Contains(got, "consumer key") || strings.Contains(got, "权限规则") {
+		t.Errorf("把令牌无效说成了权限问题,会让用户白白重建 API 凭据:\n  %s", got)
+	}
+	if !strings.Contains(got, "邮箱") {
+		t.Errorf("没指出这是邮件里的一次性令牌:\n  %s", got)
+	}
+	if !strings.Contains(got, "Invalid token") {
+		t.Errorf("原文被丢了:\n  %s", got)
+	}
+}
+
+// 真正的权限不足仍然要给出权限的说法 —— 上面那条修复不能把这条一起削掉
+func TestExplainStillDetectsRealPermissionError(t *testing.T) {
+	got := Explain(&ovhsdk.APIError{Code: 403, Message: "This call has not been granted"})
+	if !strings.Contains(got, "权限规则") {
+		t.Errorf("真的权限不足反而不提权限了:\n  %s", got)
+	}
+}
+
+// 原文认不出来时,403 只说"看原文",不许断言原因
+func TestExplainStaysVagueWhenMessageIsUnknown(t *testing.T) {
+	got := Explain(&ovhsdk.APIError{Code: 403, Message: "Some unrecognised reason"})
+	if strings.Contains(got, "多半是") {
+		t.Errorf("对认不出的原文做了断言:\n  %s", got)
+	}
+	if !strings.Contains(got, "原文") {
+		t.Errorf("没把用户引向原文:\n  %s", got)
+	}
+}

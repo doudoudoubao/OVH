@@ -84,8 +84,8 @@ export function PowerTab({ server }: { server: OwnedServer }) {
         />
         <ActionCard
           icon={Zap}
-          title="SPLA 许可证"
-          description="登记你的 Windows / SQL Server 授权"
+          title="Windows 授权 / 解锁安装"
+          description="一键解锁 Windows 模板,或登记你自己的 SPLA 授权"
           onClick={() => setSplaOpen(true)}
         />
         <ActionCard
