@@ -43,7 +43,7 @@ export function maskSensitive(value: string, hidden: boolean): string {
   const ipv4 = value.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
   if (ipv4) return `${ipv4[1]}.***.***.***`;
   // MAC：保留前 6 位（厂商段）
-  const mac = value.match(/^([0-9a-fA-F]{2}[:\-]){5}[0-9a-fA-F]{2}$/);
+  const mac = value.match(/^([0-9a-fA-F]{2}[:-]){5}[0-9a-fA-F]{2}$/);
   if (mac) return value.slice(0, 8) + ":**:**:**:**";
   // OVH 反向 DNS 主机名：ns123.ip-54-38-222.eu / 8.ip-54-38-222.eu / ip-54-38-222.eu
   // 同时把 dash 形式和 dot 形式的四段 IP 都打码

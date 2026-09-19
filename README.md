@@ -152,6 +152,17 @@ npm run dev             # 默认 :19997, /api/* 自动反代到 19998
 
 浏览器打开 `http://localhost:19997`。
 
+提交前跑一遍两边的检查(CI 跑的就是这些):
+
+```bash
+cd server && gofmt -l . && go vet ./... && go test -race -short ./...
+cd web    && npm run lint && npm run build
+```
+
+`npm run lint` 的配置在 `web/eslint.config.js`。它只对「命中基本就是写错了」的规则报
+error(未使用变量、hook 调用顺序),风格类一律 warn 或关掉 —— 理由逐条写在那个文件里。
+当前这棵树是 0 error,所以这一步变红就是你刚引入的。
+
 
 ## 首次访问
 

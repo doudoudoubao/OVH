@@ -21,7 +21,6 @@ import { useCreateQueueItem } from "@/hooks/use-queue";
 import { useCacheInfo } from "@/hooks/use-settings";
 import { useDefaultAccount } from "@/hooks/use-accounts";
 import { useActiveAccount } from "@/hooks/use-active-account";
-import { useEffect } from "react";
 import { toast } from "sonner";
 import { Loader2 } from "lucide-react";
 import {
@@ -487,7 +486,6 @@ function DetailContent({
   // 拿不到时退回默认账户,避免刚装好还没选就点不了下单。
   const [globalAccountId] = useActiveAccount();
   const accountId = globalAccountId || defaultAcc?.id || "";
-  const activeAccount = findAccountByID(accounts, accountId);
 
   // 这里选的下单账户可能跟页面顶部的活跃账户不是同一个区。
   // 库存必须按"实际下单的那个账户"的站点查:EU/US/CA 三站库存互不相通

@@ -11,7 +11,7 @@ require (
 	github.com/mattn/go-sqlite3 v1.14.44
 	github.com/ovh/go-ovh v1.5.1
 	github.com/shirou/gopsutil/v4 v4.26.4
-	golang.org/x/net v0.25.0
+	golang.org/x/net v0.58.0
 	modernc.org/sqlite v1.50.1
 )
 
@@ -48,10 +48,10 @@ require (
 	github.com/ugorji/go/codec v1.2.12 // indirect
 	github.com/yusufpapurcu/wmi v1.2.4 // indirect
 	golang.org/x/arch v0.8.0 // indirect
-	golang.org/x/crypto v0.23.0 // indirect
+	golang.org/x/crypto v0.55.0 // indirect
 	golang.org/x/oauth2 v0.18.0 // indirect
-	golang.org/x/sys v0.42.0 // indirect
-	golang.org/x/text v0.15.0 // indirect
+	golang.org/x/sys v0.47.0 // indirect
+	golang.org/x/text v0.41.0 // indirect
 	google.golang.org/appengine v1.6.7 // indirect
 	google.golang.org/protobuf v1.34.1 // indirect
 	gopkg.in/ini.v1 v1.67.0 // indirect

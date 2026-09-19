@@ -1,7 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api";
 import { qk } from "@/lib/query";
-import { errorMessage } from "@/components/common/LoadFailed";
 import { toast } from "sonner";
 
 export interface SettingsConfig {

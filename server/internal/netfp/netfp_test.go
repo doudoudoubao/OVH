@@ -191,3 +191,63 @@ func TestLookupProfileUnknown(t *testing.T) {
 		t.Fatalf("空名字是正常情况，不该告警: %s", warn)
 	}
 }
+
+// 白名单放行的每个协议,Transport 都必须真的实现。
+//
+// 两份名单(ValidateProxyURL 放行的 + Transport 的 switch 实现的)一旦走散,
+// 表现是配了代理却静默直连 —— 一切看起来正常,隔离已经没了,而用户无从察觉。
+// 这正是本包开头那条"绝不静默回退直连"要挡的事。
+// 往 SupportedProxySchemes 加一个协议而忘了在 Transport 里实现,这里会红。
+func TestTransportHandlesEverySupportedScheme(t *testing.T) {
+	for _, scheme := range SupportedProxySchemes {
+		raw := scheme + "://user:pass@127.0.0.1:1080"
+		if err := ValidateProxyURL(raw); err != nil {
+			t.Fatalf("%s 在白名单里,却没通过自己的校验: %v", scheme, err)
+		}
+		tr, err := Transport(Options{ProxyURL: raw, Profile: Profiles["default"]})
+		if err != nil {
+			t.Fatalf("%s 在白名单里,Transport 却构造失败: %v", scheme, err)
+		}
+		base := unwrapHTTPTransport(t, tr)
+		// 出口必须真的被改掉:要么 CONNECT 隧道(Proxy),要么 SOCKS 拨号(DialContext)。
+		// 两个都没设就是直连 —— 配了代理却直连,是这个包最不能出的事。
+		if base.Proxy == nil && base.DialContext == nil {
+			t.Errorf("%s: Proxy 和 DialContext 都没设,这就是静默直连", scheme)
+		}
+	}
+}
+
+// 白名单之外的协议,两道关卡都要拦,而不是其中一道放过去。
+func TestUnsupportedSchemeRejectedByBothGates(t *testing.T) {
+	for _, raw := range []string{
+		"socks4://127.0.0.1:1080",
+		"ftp://127.0.0.1:21",
+		"ssh://127.0.0.1:22",
+	} {
+		if err := ValidateProxyURL(raw); err == nil {
+			t.Errorf("%s 应当在保存那一刻就被拒绝", raw)
+		}
+		if _, err := Transport(Options{ProxyURL: raw, Profile: Profiles["default"]}); err == nil {
+			t.Errorf("%s 应当让 Transport 构造失败,而不是退回直连", raw)
+		}
+	}
+}
+
+// unwrapHTTPTransport 剥掉 proxyAware / header 这些包装层,拿到底下那个 *http.Transport。
+func unwrapHTTPTransport(t *testing.T, tr http.RoundTripper) *http.Transport {
+	t.Helper()
+	for i := 0; i < 8; i++ {
+		switch x := tr.(type) {
+		case *http.Transport:
+			return x
+		case *proxyAwareTransport:
+			tr = x.base
+		case *headerTransport:
+			tr = x.base
+		default:
+			t.Fatalf("不认识的 transport 包装层 %T", tr)
+		}
+	}
+	t.Fatal("transport 包装层数异常,可能套成环了")
+	return nil
+}

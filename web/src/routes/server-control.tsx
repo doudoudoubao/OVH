@@ -79,7 +79,6 @@ function ServerControlPage() {
   }, [servers, selectedName]);
 
   const selected = servers.find((s) => s.serviceName === selectedName) || null;
-  const activeAcc = accounts?.find((a) => a.id === activeAccount);
 
   return (
     <div className="space-y-3 sm:space-y-6">

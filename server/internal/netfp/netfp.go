@@ -126,6 +126,28 @@ func LookupProfile(name string) (Profile, string) {
 	return p, ""
 }
 
+// SupportedProxySchemes 支持的代理协议,顺序固定(用于报错文案)。
+//
+// 这是**唯一**一份名单:ValidateProxyURL 用它放行,Transport 用它兜底。
+// 两处如果各写各的,往这里加一个协议而忘了改 Transport,结果是配了代理却
+// 静默直连 —— 恰好是本包开头那条"绝不静默回退"要挡的事,而且表现是一切正常。
+// 所以 Transport 的 switch 必须有 default 分支,TestTransportHandlesEverySupportedScheme
+// 会盯着两边不许走散。
+var SupportedProxySchemes = []string{"http", "https", "socks5", "socks5h"}
+
+func isSupportedProxyScheme(scheme string) bool {
+	for _, s := range SupportedProxySchemes {
+		if s == scheme {
+			return true
+		}
+	}
+	return false
+}
+
+func unsupportedSchemeError(scheme string) error {
+	return fmt.Errorf("不支持的代理协议 %q，只支持 %s", scheme, strings.Join(SupportedProxySchemes, " / "))
+}
+
 // ValidateProxyURL 检查代理地址的形状。空串 = 直连，合法。
 //
 // 在保存那一刻就挡下来：放过去的话，用户要等到真有货那一刻才发现出口不对，
@@ -139,10 +161,8 @@ func ValidateProxyURL(raw string) error {
 	if err != nil {
 		return fmt.Errorf("代理地址解析失败: %w", err)
 	}
-	switch strings.ToLower(u.Scheme) {
-	case "http", "https", "socks5", "socks5h":
-	default:
-		return fmt.Errorf("不支持的代理协议 %q，只支持 http / https / socks5 / socks5h", u.Scheme)
+	if !isSupportedProxyScheme(strings.ToLower(u.Scheme)) {
+		return unsupportedSchemeError(u.Scheme)
 	}
 	if u.Host == "" {
 		return fmt.Errorf("代理地址缺少主机名")
@@ -267,6 +287,11 @@ func Transport(o Options) (http.RoundTripper, error) {
 		}
 		base.DialContext = ctxDialer.DialContext
 		// 明确不设 base.Proxy:SOCKS 已经在拨号层接管了
+	default:
+		// 走到这里说明 SupportedProxySchemes 放行了一个这里没实现的协议。
+		// 没有这个分支的话 base 会原样返回 —— 配了代理,却是直连,而且一切看起来正常。
+		// 宁可让这次操作失败:失败看得见,静默直连看不见。
+		return nil, unsupportedSchemeError(u.Scheme)
 	}
 	// 配了代理才包这一层:直连时"连不上"就是 OVH 那边的事,不该被当成代理故障
 	return &proxyAwareTransport{

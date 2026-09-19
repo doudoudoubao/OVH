@@ -40,7 +40,6 @@ function maskLogLine(text: string, hidden: boolean): string {
 }
 
 function LogsPage() {
-  const { hidden } = useHideIp();
   const [autoRefresh, setAutoRefresh] = useState(true);
   const logs = useLogs(autoRefresh);
   const clear = useClearLogs();
