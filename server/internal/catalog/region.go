@@ -422,20 +422,6 @@ func normalizeDCCity(dc string) string {
 //  3. 负缓存 30 秒 + 过期正缓存兜底:拉不到时优先返回上一份(过期的)目录,
 //     因为一份两小时前的区域配置远好过没有 —— 后者会让下单退回静态兜底。
 func loadSubsidiaryCatalog(state *app.State, subsidiary string) (*subsidiaryCatalog, error) {
-	return loadSubsidiaryCatalogWithin(state, subsidiary, regionCacheTTL)
-}
-
-// loadSubsidiaryCatalogWithin 和上面一样,但由调用方决定能接受多旧的缓存。
-//
-// 新机型发现器要传 0(= 缓存一律不算数,每轮都真的重拉):它的全部职责就是
-// "目录里有没有冒出没见过的 planCode",而 2 小时缓存意味着最多晚 2 小时才发现,
-// 那条轮询就失去了意义。代价是每轮一份 12MB 的公开请求(不占账户配额)。
-//
-// **不能用"删掉缓存再拉"来实现这件事**:下面那段失败兜底靠的就是
-// regionCache 里还留着的旧目录 —— 先删掉的话,一次网络抖动就从
-// "用两小时前的目录继续跑"变成"彻底没有目录",而下单链路的 region 解析也吃这份缓存。
-// 所以这里只是放宽新鲜度判据,一个字节都不删。
-func loadSubsidiaryCatalogWithin(state *app.State, subsidiary string, maxAge time.Duration) (*subsidiaryCatalog, error) {
 	// 缓存 key 统一大写:OVH 只认大写子公司,调用方要是传了小写,
 	// 既会多拉一份缓存,请求本身也会 400。
 	subsidiary = strings.ToUpper(strings.TrimSpace(subsidiary))
@@ -444,9 +430,7 @@ func loadSubsidiaryCatalogWithin(state *app.State, subsidiary string, maxAge tim
 	}
 
 	regionCacheMu.Lock()
-	// maxAge <= 0 显式写出来:光靠 time.Since(...) < 0 的话,系统时钟往回跳一下
-	// (NTP 校时、虚拟机挂起恢复)就会让"强制刷新"悄悄变成"读缓存"。
-	if c, ok := regionCache[subsidiary]; ok && maxAge > 0 && time.Since(c.fetchedAt) < maxAge {
+	if c, ok := regionCache[subsidiary]; ok && time.Since(c.fetchedAt) < regionCacheTTL {
 		regionCacheMu.Unlock()
 		return c, nil
 	}
@@ -469,29 +453,6 @@ func loadSubsidiaryCatalogWithin(state *app.State, subsidiary string, maxAge tim
 	regionCacheCall[subsidiary] = call
 	regionCacheMu.Unlock()
 
-	// fetchSubsidiaryCatalog 解析的是一份 12MB 的外部 JSON,不能假设它永不 panic。
-	// 而一旦它 panic,下面那几行就都跑不到:regionCacheCall 里的条目留着、
-	// done 永远不关 —— 之后**每一个**要这个子公司目录的调用都会永久阻塞在
-	// 上面那句 <-call.done 上。监控、下单的 region 解析、询价全部静默卡死,
-	// 而且不重启就恢复不了(负缓存也救不了,它在更前面就被 done 挡住了)。
-	//
-	// 这个 defer 保证无论怎么退出,在途标记都摘掉、done 都关掉。
-	completed := false
-	defer func() {
-		if completed {
-			return
-		}
-		regionCacheMu.Lock()
-		if regionCacheCall[subsidiary] == call {
-			delete(regionCacheCall, subsidiary)
-		}
-		regionCacheMu.Unlock()
-		if call.err == nil {
-			call.err = fmt.Errorf("拉取 %s 目录时发生内部异常", subsidiary)
-		}
-		close(call.done)
-	}()
-
 	cat, err := fetchSubsidiaryCatalog(state, subsidiary)
 
 	regionCacheMu.Lock()
@@ -512,7 +473,6 @@ func loadSubsidiaryCatalogWithin(state *app.State, subsidiary string, maxAge tim
 	regionCacheMu.Unlock()
 
 	call.cat, call.err = cat, err
-	completed = true
 	close(call.done)
 	return cat, err
 }

@@ -287,9 +287,6 @@ func main() {
 		api.POST("/monitor/stop", handlers.StopMonitor(state, mon))
 		api.GET("/monitor/status", handlers.GetMonitorStatus(state, mon))
 		api.PUT("/monitor/interval", handlers.SetMonitorInterval(state, mon))
-		// 新机型发现器的开关与月费上限
-		api.GET("/monitor/new-plan-watch", handlers.GetNewPlanWatch(state, mon))
-		api.PUT("/monitor/new-plan-watch", handlers.SetNewPlanWatch(state, mon))
 		api.POST("/monitor/test-notification", handlers.TestNotification(state))
 		// 通知通道体检:哪条配了、哪条能用。?verify=true 会真的去调远端
 		api.GET("/notify/channels", handlers.GetNotifyChannels(state))
@@ -579,9 +576,6 @@ func main() {
 	// 预热各账户子公司的区域配置:region 的合法取值要从 10MB 的公开目录里解析,
 	// 首次解析放在抢购链路上会白白慢 2-7 秒
 	go catalog.WarmRegionCache(state)
-	// 新机型发现:定时比对目录,冒出没见过的 planCode 就通知(并按配置自动建监控)。
-	// 默认是关的,开关在设置里 —— 关着的时候这条循环连目录都不拉。
-	go mon.NewPlanLoop()
 	// 按账户的出站代理看门狗:代理连续挂掉就暂停那个账户的任务并通知用户。
 	//
 	// 必须在任何 OVH 调用之前接好 —— SetProxyErrorHook 会清掉已缓存的 client

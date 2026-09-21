@@ -14,7 +14,6 @@ import {
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { PageHeader } from "@/components/common/PageHeader";
-import { NewPlanWatchCard } from "@/components/monitor/NewPlanWatchCard";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -158,9 +157,6 @@ function MonitorPage() {
           </div>
         </CardContent>
       </Card>
-
-      {/* 新机型发现：目录里冒出没见过的 planCode 时通知（可选自动建监控，永不自动付款） */}
-      <NewPlanWatchCard />
 
       {/* 订阅列表 */}
       {list.isPending ? (

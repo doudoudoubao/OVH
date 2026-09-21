@@ -73,13 +73,6 @@ func QuickOrder(state *app.State) gin.HandlerFunc {
 			FromMonitor        bool     `json:"fromMonitor"`
 			SkipDuplicateCheck bool     `json:"skipDuplicateCheck"`
 			AutoPay            bool     `json:"autoPay"`
-			// MaxMonthly / MaxMonthlyCurrency 月费上限,只有"程序自己决定买什么"的
-			// 路径才会带(新机型自动下单)。0 = 不限,也是人手下单的默认 ——
-			// 用户从界面挑型号时已经看见价格了,不需要这道闸。
-			// 真正的判定在 PurchaseServer 结账前(见 purchase/pricecap.go):
-			// addon 要到下单那一刻才从有货的 FQN 推出来,这里还不知道最终配置。
-			MaxMonthly         float64 `json:"maxMonthly"`
-			MaxMonthlyCurrency string  `json:"maxMonthlyCurrency"`
 		}
 		_ = c.ShouldBindJSON(&body)
 		if body.PlanCode == "" || body.Datacenter == "" {
@@ -264,9 +257,6 @@ func QuickOrder(state *app.State) gin.HandlerFunc {
 			LastCheckTime: 0,
 			QuickOrder:    true,
 			Priority:      100,
-
-			MaxMonthly:         body.MaxMonthly,
-			MaxMonthlyCurrency: body.MaxMonthlyCurrency,
 		}
 		// 落库失败以前是 `_ = state.SaveQueue()` —— 直接吞掉。
 		// 这条路是监控触发的自动下单:发现有货 → 建任务 → 落库失败无人知晓,

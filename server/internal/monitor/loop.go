@@ -80,6 +80,39 @@ func (m *Monitor) checkNotifyOrStop() bool {
 	return true
 }
 
+func (m *Monitor) CheckNewServers(currentServerList []map[string]interface{}) {
+	current := map[string]struct{}{}
+	for _, s := range currentServerList {
+		if pc, ok := s["planCode"].(string); ok && pc != "" {
+			current[pc] = struct{}{}
+		}
+	}
+	m.subsMu.Lock()
+	defer m.subsMu.Unlock()
+	if len(m.knownServers) == 0 {
+		m.knownServers = current
+		m.state.Logger.Info(fmt.Sprintf("初始化已知服务器列表: %d 台", len(current)), "monitor")
+		return
+	}
+	newServers := []string{}
+	for k := range current {
+		if _, ok := m.knownServers[k]; !ok {
+			newServers = append(newServers, k)
+		}
+	}
+	if len(newServers) > 0 {
+		for _, code := range newServers {
+			for _, s := range currentServerList {
+				if pc, _ := s["planCode"].(string); pc == code {
+					m.SendNewServerAlert(s)
+				}
+			}
+		}
+		m.knownServers = current
+		m.state.Logger.Info(fmt.Sprintf("检测到 %d 台新服务器上架", len(newServers)), "monitor")
+	}
+}
+
 func (m *Monitor) runSubscriptionCheck(sub *Subscription, traceID string) {
 	planCode := sub.PlanCode
 	m.state.Logger.Info("开始处理订阅: "+planCode, "monitor")
@@ -241,7 +274,7 @@ func (m *Monitor) Stop() bool {
 // batchOrder 监控触发的批量下单:逐个调本地 quick-order 入队。
 // accountID:auto_order 账户;空时 batchOrder 不应该被调到(check.go 的 guard 已挡住),
 // 这里再做一次防御性检查。
-func (m *Monitor) batchOrder(planCode string, configInfo map[string]interface{}, targets []notification, quantity int, accountID string, autoPay bool, maxMonthly float64, maxMonthlyCurrency string) {
+func (m *Monitor) batchOrder(planCode string, configInfo map[string]interface{}, targets []notification, quantity int, accountID string, autoPay bool) {
 	if accountID == "" {
 		m.state.Logger.Warn("[monitor->order] 跳过自动下单: 订阅未指定 auto_order 账户", "monitor")
 		return
@@ -300,11 +333,6 @@ func (m *Monitor) batchOrder(planCode string, configInfo map[string]interface{},
 			"skipDuplicateCheck": true,
 			// 订阅上显式开了才带过去;默认 false,不替用户扣钱
 			"autoPay": autoPay,
-			// 月费上限。0 = 不限(用户手建的订阅都是 0,行为不变)。
-			// 带过去只是为了让它跟着任务进队列 —— 真正的判定在
-			// PurchaseServer 结账之前,那时 addon 才刚从有货的 FQN 推出来。
-			"maxMonthly":         maxMonthly,
-			"maxMonthlyCurrency": maxMonthlyCurrency,
 		}
 		body, _ := json.Marshal(payload)
 		req, _ := http.NewRequest(http.MethodPost,

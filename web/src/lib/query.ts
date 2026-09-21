@@ -51,7 +51,6 @@ export const qk = {
     list: () => ["monitor", "list"] as const,
     status: () => ["monitor", "status"] as const,
     history: (planCode: string) => ["monitor", "history", planCode] as const,
-    newPlanWatch: () => ["monitor", "new-plan-watch"] as const,
   },
 
   // VPS 补货通知

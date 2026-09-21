@@ -158,8 +158,8 @@ func dcDisplayShortName(dc string) string {
 //
 // 锁:这里取 subsMu。调用链是 monitorLoop → runSubscriptionCheck → CheckAvailabilityChange
 // → 本函数,全程不持有 subsMu(loop.go 只在拷贝订阅列表时短暂加锁),不会自锁。
-// 新机型通知(newplan.go 的 sendNewPlanAlert)那条路径没有按钮,也不持 subsMu,
-// 与本函数无关。
+// 注意 SendNewServerAlert 是在 CheckNewServers 持有 subsMu 时调用的,那条路径没有按钮,
+// 也不要在它里面调本函数。
 func (m *Monitor) resolveNotifyAccountID(planCode string, explicit ...string) string {
 	valid := func(id string) string {
 		id = strings.TrimSpace(id)
@@ -620,6 +620,14 @@ func (m *Monitor) SendAvailabilityAlert(planCode, datacenter, status, changeType
 	} else {
 		m.state.Logger.Warn(fmt.Sprintf("⚠️ Telegram通知发送失败: %s@%s%s", planCode, datacenter, configDesc), "monitor")
 	}
+}
+
+func (m *Monitor) SendNewServerAlert(server map[string]interface{}) {
+	msg := fmt.Sprintf("🆕 新服务器上架通知！\n\n型号: %v\n名称: %v\nCPU: %v\n内存: %v\n存储: %v\n带宽: %v\n时间: %s\n\n💡 快去查看详情！",
+		server["planCode"], server["name"], server["cpu"], server["memory"], server["storage"], server["bandwidth"],
+		m.nowBeijing().Format("2006-01-02 15:04:05"))
+	notify.Broadcast(m.state, msg, nil)
+	m.state.Logger.Info(fmt.Sprintf("发送新服务器提醒: %v", server["planCode"]), "monitor")
 }
 
 // maxOrderButtons 上架通知里最多放几颗一键下单按钮。
