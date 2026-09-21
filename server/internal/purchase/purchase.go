@@ -392,6 +392,10 @@ func PurchaseServer(ctx context.Context, state *app.State, item *types.QueueItem
 	// 硬件选项处理。effectiveOptions 已经包含了：
 	//   - 用户显式 options（如果有），或
 	//   - 从可用 FQN 推断的 addon planCode（用户没指定时）
+	// addedAddons 真正加进这辆车的 addon planCode(目录里的完整码,不是 FQN 短前缀)。
+	// 月费上限要按它算 —— 用 effectiveOptions 的话,短前缀在目录里查不到,
+	// PriceForOptions 会标 Partial 并给出偏低的价,上限就形同虚设。
+	var addedAddons []string
 	if len(effectiveOptions) > 0 {
 		state.Logger.Info(fmt.Sprintf("📦 处理硬件选项（%d个）: %v", len(effectiveOptions), effectiveOptions), "purchase")
 		filtered := filterHardwareOptions(state, effectiveOptions, true)
@@ -435,6 +439,7 @@ func PurchaseServer(ctx context.Context, state *app.State, item *types.QueueItem
 				// （prices[] 的元素）里，GenericOptionDefinition 顶层没有这两个字段，
 				// 直接读顶层永远读不到、恒回退硬编码值
 				duration, pricingMode := pickPricing(matchedOpt["prices"], baseDuration)
+				addedAddons = append(addedAddons, matchedPC)
 				todo = append(todo, addonPayload{
 					planCode: matchedPC,
 					body: map[string]interface{}{
@@ -485,6 +490,12 @@ func PurchaseServer(ctx context.Context, state *app.State, item *types.QueueItem
 	}
 
 	tl.mark("加硬件选项")
+
+	// 月费上限闸。放在这里而不是入队时:addon 是刚刚才从"当时有货的那套 FQN"
+	// 推出来的,入队那一刻根本不知道最终买的是哪套配置(见 enforceMonthlyCap 的说明)。
+	if out, blocked := enforceMonthlyCap(state, item, addedAddons); blocked {
+		return out
+	}
 
 	// 直接结账 —— 跳过 /summary(它只是日志用的价格,2 秒开销),
 	// 价格 + 过期时间下面 checkout 成功后用 /me/order 异步补,不阻塞主流程。

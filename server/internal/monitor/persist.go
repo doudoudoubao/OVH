@@ -57,6 +57,9 @@ func toDBSub(s *Subscription) types.Subscription {
 		AutoOrderAccountID: s.AutoOrderAccountID,
 		AutoPay:            s.AutoPay,
 		Options:            s.Options,
+		MaxMonthly:         s.MaxMonthly,
+		MaxMonthlyCurrency: s.MaxMonthlyCurrency,
+		AutoCreatedFrom:    s.AutoCreatedFrom,
 	}
 }
 
@@ -94,6 +97,9 @@ func fromDBSub(s types.Subscription) *Subscription {
 		AutoOrderAccountID: s.AutoOrderAccountID,
 		AutoPay:            s.AutoPay,
 		Options:            s.Options,
+		MaxMonthly:         s.MaxMonthly,
+		MaxMonthlyCurrency: s.MaxMonthlyCurrency,
+		AutoCreatedFrom:    s.AutoCreatedFrom,
 	}
 }
 
