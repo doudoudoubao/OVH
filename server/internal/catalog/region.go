@@ -453,6 +453,29 @@ func loadSubsidiaryCatalog(state *app.State, subsidiary string) (*subsidiaryCata
 	regionCacheCall[subsidiary] = call
 	regionCacheMu.Unlock()
 
+	// fetchSubsidiaryCatalog 解析的是一份 12MB 的外部 JSON,不能假设它永不 panic。
+	// 而一旦它 panic,下面那几行就都跑不到:regionCacheCall 里的条目留着、
+	// done 永远不关 —— 之后**每一个**要这个子公司目录的调用都会永久阻塞在
+	// 上面那句 <-call.done 上。监控、下单的 region 解析、询价全部静默卡死,
+	// 而且不重启就恢复不了(负缓存也救不了,它在更前面就被 done 挡住了)。
+	//
+	// 这个 defer 保证无论怎么退出,在途标记都摘掉、done 都关掉。
+	completed := false
+	defer func() {
+		if completed {
+			return
+		}
+		regionCacheMu.Lock()
+		if regionCacheCall[subsidiary] == call {
+			delete(regionCacheCall, subsidiary)
+		}
+		regionCacheMu.Unlock()
+		if call.err == nil {
+			call.err = fmt.Errorf("拉取 %s 目录时发生内部异常", subsidiary)
+		}
+		close(call.done)
+	}()
+
 	cat, err := fetchSubsidiaryCatalog(state, subsidiary)
 
 	regionCacheMu.Lock()
@@ -473,6 +496,7 @@ func loadSubsidiaryCatalog(state *app.State, subsidiary string) (*subsidiaryCata
 	regionCacheMu.Unlock()
 
 	call.cat, call.err = cat, err
+	completed = true
 	close(call.done)
 	return cat, err
 }
