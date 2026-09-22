@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/ovh-buy/server/internal/app"
+	"github.com/ovh-buy/server/internal/config"
 	"github.com/ovh-buy/server/internal/db"
 	"github.com/ovh-buy/server/internal/logger"
 	"github.com/ovh-buy/server/internal/types"
@@ -25,6 +26,9 @@ func renderTestMonitor(t *testing.T) *Monitor {
 	t.Cleanup(func() { database.Close() })
 	state := &app.State{
 		DB: database,
+		// Config 不能留 nil:通知那条路会 state.Config.Get(),
+		// 真实运行时它一定存在,测试里缺了就是一个只有测试才会踩的空指针。
+		Config: config.New(database),
 		Logger: logger.New(filepath.Join(dir, "logs.json"),
 			slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))),
 	}

@@ -14,6 +14,7 @@ import {
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { PageHeader } from "@/components/common/PageHeader";
+import { NewPlanWatchCard } from "@/components/monitor/NewPlanWatchCard";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -158,6 +159,9 @@ function MonitorPage() {
         </CardContent>
       </Card>
 
+      {/* 新机型发现：目录里冒出没见过的 planCode 时通知（可选自动建监控，永不自动付款） */}
+      <NewPlanWatchCard />
+
       {/* 订阅列表 */}
       {list.isPending ? (
         <div className="space-y-3">
@@ -291,8 +295,15 @@ function SubRow({
           <div className="flex-1 min-w-0">
             <div className="flex items-center gap-2 mb-1 flex-wrap">
               <span className="font-mono font-semibold text-sm">{sub.planCode}</span>
-              {sub.serverName && (
+              {sub.serverName && sub.serverName !== sub.planCode && (
                 <span className="text-xs text-muted-foreground">| {sub.serverName}</span>
+              )}
+              {/* 这条不是用户自己建的。不标出来的话，他在列表里看到一条没印象的订阅，
+                  既不知道哪来的，也不知道它带着月费上限 */}
+              {sub.autoCreatedFrom && (
+                <Chip tone="info" title="由「新机型发现」自动建立，可以随时删除">
+                  自动建立
+                </Chip>
               )}
             </div>
             <p className="text-xs text-muted-foreground mb-1.5">
@@ -323,6 +334,16 @@ function SubRow({
                   </Chip>
                   <span className="text-[11px] text-muted-foreground">→</span>
                   <AccountChip accountId={sub.autoOrderAccountId} />
+                  {/* 带上限的订阅必须显示上限：否则用户看到「自动下单」却不买，
+                      无从知道是被这道闸拦的 */}
+                  {sub.maxMonthly && sub.maxMonthly > 0 ? (
+                    <Chip
+                      tone="info"
+                      title="下单前会按真实配置（含内存/硬盘加价）复核月费，超过就不下单"
+                    >
+                      ≤ {sub.maxMonthly} {sub.maxMonthlyCurrency ?? ""}/月
+                    </Chip>
+                  ) : null}
                 </>
               ) : sub.autoOrder ? (
                 <Chip tone="warning">已勾自动下单但未选账户(只通知)</Chip>

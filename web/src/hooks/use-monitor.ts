@@ -23,6 +23,12 @@ export interface MonitorSubscription {
    * 后端引擎一直支持这个字段，只是前端以前没接，所以网页建的订阅永远是「盯全部」。
    */
   options?: string[];
+  /** 自动下单的月费上限（含税）。0 / 缺省 = 不限 */
+  maxMonthly?: number;
+  /** 上限的币种。后端不做汇率换算，对不上就不下单 */
+  maxMonthlyCurrency?: string;
+  /** 非空 = 这条订阅是程序自己建的（目前只有 "new-plan-watch"） */
+  autoCreatedFrom?: string;
   lastStatus: Record<string, string>;
   createdAt: string;
 }
@@ -165,5 +171,67 @@ export function useSetMonitorInterval() {
       toast.success(data.message || "检查间隔已更新");
     },
     onError: (e: any) => toast.error(e.response?.data?.message || "设置失败"),
+  });
+}
+
+/**
+ * 新机型发现器的配置。
+ *
+ * 后端默认全关。autoOrder 开着时 maxMonthly 和 currency 都必填 ——
+ * 没有上限的自动下单是一张空白支票，后端也会拒绝保存。
+ *
+ * 要紧的一点：这条路径**永远不会自动付款**。订单停在 notPaid，
+ * 逾期自动作废，付不付由你自己决定。所以这里没有 autoPay 这个字段，
+ * 不是默认关，是压根没有。
+ */
+export interface NewPlanWatchConfig {
+  enabled: boolean;
+  intervalMinutes: number;
+  autoOrder: boolean;
+  /** 月费上限（含税）。0 = 未设 */
+  maxMonthly: number;
+  /** 上限的币种。必须和账户所在站点的计价币种一致 —— 后端不做汇率换算 */
+  currency: string;
+  /** 用哪个账户下单。空 = 按机型所属站点自动挑 */
+  accountId: string;
+  /** 单轮最多为几个新机型建自动下单订阅 */
+  maxPerRound: number;
+}
+
+export interface NewPlanWatchResponse {
+  config: NewPlanWatchConfig;
+  /** 基线里有多少个机型。0 = 还没建过基线，下一轮只建基线不告警 */
+  knownPlanCount: number;
+  /** 子公司 → 计价币种，给上限那一栏当提示。只读缓存，拿不到就是空对象（后端不猜也不拉） */
+  currencyHint: Record<string, string>;
+  /** 有账户的站点数 = 每轮各拉一份 12MB 目录的份数。不要从 currencyHint 推，那个缓存冷时是空的 */
+  siteCount: number;
+  minIntervalMins: number;
+  maxIntervalMins: number;
+}
+
+export function useNewPlanWatch() {
+  return useQuery({
+    queryKey: qk.monitor.newPlanWatch(),
+    queryFn: async () =>
+      (await api.get<NewPlanWatchResponse>("/monitor/new-plan-watch")).data,
+    staleTime: 30_000,
+  });
+}
+
+export function useSaveNewPlanWatch() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (cfg: NewPlanWatchConfig) =>
+      (await api.put("/monitor/new-plan-watch", cfg)).data as {
+        status: string;
+        message: string;
+        config: NewPlanWatchConfig;
+      },
+    onSuccess: (data) => {
+      qc.invalidateQueries({ queryKey: qk.monitor.newPlanWatch() });
+      toast.success(data.message || "已保存");
+    },
+    onError: (e: any) => toast.error(e.response?.data?.message || "保存失败"),
   });
 }

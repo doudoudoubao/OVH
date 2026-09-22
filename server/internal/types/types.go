@@ -168,6 +168,19 @@ type QueueItem struct {
 	// 默认 false:自动扣钱必须是用户显式打开的开关,不能是隐含行为。
 	AutoPay            bool   `json:"autoPay,omitempty"`
 	ConfigSniperTaskID string `json:"configSniperTaskId,omitempty"`
+
+	// MaxMonthly 这一单的月费上限(含税,目录口径)。0 = 不限,也是手工下单的默认。
+	//
+	// 只有"程序自己决定要买什么"的路径才会设它(新机型自动下单)。用户自己从界面
+	// 挑好型号点下单时,他已经看见价格了,不需要这道闸 —— 所以 0 必须是零成本:
+	// 闸门整段跳过,抢购主链路一次多余的目录查询都不做。
+	MaxMonthly float64 `json:"maxMonthly,omitempty"`
+	// MaxMonthlyCurrency 上限的币种(EUR / USD / CAD ...)。
+	//
+	// 必须跟着上限一起存:OVH 三个站点计价币种不同,同一个数字 15 在 EUR 和 USD
+	// 下不是一回事。**不做汇率换算** —— 币种对不上时直接不下单,
+	// 猜一个汇率去决定花不花钱是荒唐的。
+	MaxMonthlyCurrency string `json:"maxMonthlyCurrency,omitempty"`
 }
 
 // PriceInfo 价格信息
@@ -283,6 +296,19 @@ type Subscription struct {
 	// 用户想要的往往是"只盯 64G + 2x480SSD 那套"。
 	// 没有这个字段之前,他没有任何办法表达这件事。
 	Options []string `json:"options,omitempty"`
+
+	// MaxMonthly / MaxMonthlyCurrency 自动下单的月费上限,0 = 不限。
+	//
+	// 给「新机型自动下单」用:那条路径是程序自己决定买什么的,用户没看过价格,
+	// 所以必须有个上限。用户手建的订阅默认 0,行为不变。
+	// 这里只是把它带到下单请求上,真正的判定在 PurchaseServer 结账之前。
+	MaxMonthly         float64 `json:"maxMonthly,omitempty"`
+	MaxMonthlyCurrency string  `json:"maxMonthlyCurrency,omitempty"`
+
+	// AutoCreatedFrom 这条订阅是谁建的。空 = 用户自己建的。
+	// "new-plan-watch" = 新机型发现器自动建的,通知文案会说明来历,
+	// 免得用户在监控页看到一条自己没建过的订阅而摸不着头脑。
+	AutoCreatedFrom string `json:"autoCreatedFrom,omitempty"`
 }
 
 // VPSSubscription VPS 监控订阅

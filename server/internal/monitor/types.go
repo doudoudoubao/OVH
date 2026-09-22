@@ -25,6 +25,14 @@ type Monitor struct {
 	// 两个循环并存 → 同一次补货被下两次单,而 skipDuplicateCheck 已关掉去重。
 	generation   int64
 	knownServers map[string]struct{}
+	// baselinedSubs 哪些子公司已经建过"新机型"基线。
+	//
+	// 为什么不能只看 len(knownServers)==0:目录是**按子公司**分的,一轮里要逐个拉。
+	// 拿一个扁平集合判"是不是第一次",第一个子公司建完基线之后它就非空了,
+	// 于是第二个子公司的**整份目录**都会被判成新上架 —— 开了自动下单就是当场锁货。
+	// 同一个坑还有两条路:后来新增一个别的区的账户、以及某个子公司本轮拉取失败下轮才成功。
+	// 所以基线必须按子公司各记各的。
+	baselinedSubs map[string]struct{}
 
 	// dirty 检查循环里有没有改出需要落库的东西(LastStatus / History)。
 	//
@@ -105,6 +113,13 @@ type Subscription struct {
 	// 一个 planCode 底下常有好几套内存/存储组合,而通知和自动下单是按配置逐套触发的,
 	// "自动抢 1 台"在三套配置同时补货时会下三次单(再乘机房数)。
 	Options []string `json:"options,omitempty"`
+	// MaxMonthly / MaxMonthlyCurrency 自动下单的月费上限,0 = 不限。
+	// 给新机型发现器建的订阅用;用户手建的是 0,行为不变。
+	// 只是带到下单请求上,真正判定在 PurchaseServer 结账前(purchase/pricecap.go)。
+	MaxMonthly         float64 `json:"maxMonthly,omitempty"`
+	MaxMonthlyCurrency string  `json:"maxMonthlyCurrency,omitempty"`
+	// AutoCreatedFrom 非空 = 这条订阅是程序自己建的(目前只有 "new-plan-watch")。
+	AutoCreatedFrom string `json:"autoCreatedFrom,omitempty"`
 
 	// —— 本轮可用性查询的诊断信息 ——
 	// 只存内存、不落库(每轮检查都会重算,持久化没有意义)。
@@ -137,6 +152,9 @@ type subCheckConfig struct {
 	AutoOrderAccountID string
 	AutoPay            bool
 	Options            []string
+	MaxMonthly         float64
+	MaxMonthlyCurrency string
+	AutoCreatedFrom    string
 }
 
 func (s *Subscription) checkConfig() subCheckConfig {
@@ -156,6 +174,9 @@ func (s *Subscription) checkConfig() subCheckConfig {
 		Quantity:           s.Quantity,
 		AutoOrderAccountID: s.AutoOrderAccountID,
 		AutoPay:            s.AutoPay,
+		MaxMonthly:         s.MaxMonthly,
+		MaxMonthlyCurrency: s.MaxMonthlyCurrency,
+		AutoCreatedFrom:    s.AutoCreatedFrom,
 	}
 }
 
@@ -254,6 +275,9 @@ func (s *Subscription) snapshot() *Subscription {
 		Quantity:           s.Quantity,
 		AutoOrderAccountID: s.AutoOrderAccountID,
 		AutoPay:            s.AutoPay,
+		MaxMonthly:         s.MaxMonthly,
+		MaxMonthlyCurrency: s.MaxMonthlyCurrency,
+		AutoCreatedFrom:    s.AutoCreatedFrom,
 
 		LastCheckAt:         s.LastCheckAt,
 		LastCheckAccountID:  s.LastCheckAccountID,
@@ -279,6 +303,7 @@ func New(state *app.State) *Monitor {
 		state:               state,
 		subscriptions:       []*Subscription{},
 		knownServers:        map[string]struct{}{},
+		baselinedSubs:       map[string]struct{}{},
 		checkInterval:       5,
 		maxWorkers:          4,
 		optionsCache:        map[string]*CachedOptions{},

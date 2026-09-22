@@ -10,6 +10,12 @@ import (
 // kvMonitorInterval 检查间隔在 kv 表里的键
 const kvMonitorInterval = "monitor_check_interval"
 
+// kvBaselinedSubs 已建过"新机型"基线的子公司。
+//
+// 必须和 known_servers 一起落库:不落的话每次重启所有子公司都要重新建基线,
+// 而建基线那一轮是**不告警**的 —— 程序没跑的那段时间里上架的新机型会被静默吞掉。
+const kvBaselinedSubs = "monitor_newplan_baselined_subsidiaries"
+
 // monitor 包内部用 Subscription / HistoryEntry，
 // 而 SQLite 层用 types.Subscription / types.SubscriptionHistoryEntry。
 // 字段一一对应，下面提供双向转换。
@@ -57,6 +63,9 @@ func toDBSub(s *Subscription) types.Subscription {
 		AutoOrderAccountID: s.AutoOrderAccountID,
 		AutoPay:            s.AutoPay,
 		Options:            s.Options,
+		MaxMonthly:         s.MaxMonthly,
+		MaxMonthlyCurrency: s.MaxMonthlyCurrency,
+		AutoCreatedFrom:    s.AutoCreatedFrom,
 	}
 }
 
@@ -94,6 +103,9 @@ func fromDBSub(s types.Subscription) *Subscription {
 		AutoOrderAccountID: s.AutoOrderAccountID,
 		AutoPay:            s.AutoPay,
 		Options:            s.Options,
+		MaxMonthly:         s.MaxMonthly,
+		MaxMonthlyCurrency: s.MaxMonthlyCurrency,
+		AutoCreatedFrom:    s.AutoCreatedFrom,
 	}
 }
 
@@ -109,6 +121,10 @@ func (m *Monitor) LoadFromDB() {
 	if _, err := m.state.DB.GetKV("monitor_known_servers", &known); err != nil {
 		m.state.Logger.Warn("加载已知服务器失败: "+err.Error(), "monitor")
 	}
+	baselined := []string{}
+	if _, err := m.state.DB.GetKV(kvBaselinedSubs, &baselined); err != nil {
+		m.state.Logger.Warn("加载新机型基线状态失败: "+err.Error(), "monitor")
+	}
 
 	m.subsMu.Lock()
 	defer m.subsMu.Unlock()
@@ -121,6 +137,11 @@ func (m *Monitor) LoadFromDB() {
 		knownSet[k] = struct{}{}
 	}
 	m.knownServers = knownSet
+	baselineSet := map[string]struct{}{}
+	for _, k := range baselined {
+		baselineSet[k] = struct{}{}
+	}
+	m.baselinedSubs = baselineSet
 	// 检查间隔从 kv 恢复;没存过或超出合法区间时夹回默认 5 秒
 	interval := MinCheckInterval
 	var saved int
@@ -153,12 +174,19 @@ func (m *Monitor) SaveToDB() {
 	for k := range m.knownServers {
 		known = append(known, k)
 	}
+	baselined := make([]string, 0, len(m.baselinedSubs))
+	for k := range m.baselinedSubs {
+		baselined = append(baselined, k)
+	}
 	interval := m.checkInterval
 	m.subsMu.Unlock()
 
 	if err := m.state.DB.ReplaceMonitorSubscriptions(subs); err != nil {
 		m.state.Logger.Error("保存监控订阅失败: "+err.Error(), "monitor")
 		return
+	}
+	if err := m.state.DB.SetKV(kvBaselinedSubs, baselined); err != nil {
+		m.state.Logger.Error("保存新机型基线状态失败: "+err.Error(), "monitor")
 	}
 	if err := m.state.DB.SetKV("monitor_known_servers", known); err != nil {
 		m.state.Logger.Error("保存已知服务器失败: "+err.Error(), "monitor")
