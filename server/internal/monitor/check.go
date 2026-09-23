@@ -411,6 +411,9 @@ func (m *Monitor) CheckAvailabilityChange(sub *Subscription, traceID string) {
 	m.state.Logger.Info(fmt.Sprintf("订阅 %s - 监控数据中心: %v", planCode, monitoredDCs), "monitor")
 	m.state.Logger.Info(fmt.Sprintf("订阅 %s - 当前发现 %d 个配置组合", planCode, len(currentAvailability)), "monitor")
 
+	// 本轮下单额度跨全部配置累计。按配置各算各的话,盯全部配置的订阅
+	// 一次补货能下 配置数 × 机房数 单(见 orderBudget)。
+	ordersLeft := orderBudget(cfg)
 	for configKey, configData := range currentAvailability {
 		// 订阅指定了配置就只盯那一套。
 		//
@@ -702,8 +705,8 @@ func (m *Monitor) CheckAvailabilityChange(sub *Subscription, traceID string) {
 					"[monitor] %s 跳过自动下单:验价用的是账户 %q,而订阅指定的下单账户是 %q,两者不一致(下单账户可能已被删除)",
 					planCode, choice.accountID, cfg.AutoOrderAccountID), "monitor")
 			default:
-				m.batchOrder(planCode, configInfo, orderTargets, cfg.Quantity, cfg.AutoOrderAccountID, cfg.AutoPay,
-					cfg.MaxMonthly, cfg.MaxMonthlyCurrency)
+				ordersLeft -= m.batchOrder(planCode, configInfo, orderTargets, cfg.Quantity, cfg.AutoOrderAccountID, cfg.AutoPay,
+					cfg.MaxMonthly, cfg.MaxMonthlyCurrency, ordersLeft)
 			}
 		}
 

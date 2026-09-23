@@ -18,7 +18,7 @@ import (
 // 失败立即调 Stop() 自停监控。
 const tgRecheckInterval = 5 * time.Minute
 
-// maxOrdersPerTrigger 一次补货跳变最多下多少单(机房数 × quantity 的乘积上限)。
+// maxOrdersPerTrigger 一次检查最多下多少单(跨全部配置累计,见 orderBudget)。
 //
 // 这是个纯粹的防脚滑护栏,不是业务限制:订阅里的 quantity 没有上限,
 // 而真正的单数还要乘上"本轮同时补货的机房数" —— 这个乘法在界面上看不见。
@@ -241,10 +241,17 @@ func (m *Monitor) Stop() bool {
 // batchOrder 监控触发的批量下单:逐个调本地 quick-order 入队。
 // accountID:auto_order 账户;空时 batchOrder 不应该被调到(check.go 的 guard 已挡住),
 // 这里再做一次防御性检查。
-func (m *Monitor) batchOrder(planCode string, configInfo map[string]interface{}, targets []notification, quantity int, accountID string, autoPay bool, maxMonthly float64, maxMonthlyCurrency string) {
+//
+// limit 是本轮检查**还剩**的下单额度(见 orderBudget)。batchOrder 是按配置逐套调的,
+// 封顶必须由调用方跨配置累计,这里只负责不超过它。返回成功入队的单数。
+func (m *Monitor) batchOrder(planCode string, configInfo map[string]interface{}, targets []notification, quantity int, accountID string, autoPay bool, maxMonthly float64, maxMonthlyCurrency string, limit int) int {
 	if accountID == "" {
 		m.state.Logger.Warn("[monitor->order] 跳过自动下单: 订阅未指定 auto_order 账户", "monitor")
-		return
+		return 0
+	}
+	if limit <= 0 {
+		m.state.Logger.Warn(fmt.Sprintf("[monitor->order] %s 本轮下单额度已用完,这套配置不再下单", planCode), "monitor")
+		return 0
 	}
 	if quantity < 0 {
 		quantity = 0
@@ -255,12 +262,12 @@ func (m *Monitor) batchOrder(planCode string, configInfo map[string]interface{},
 	// 一次跳变就是 15 单。用户填 quantity 时想的是"每个机房买几台",
 	// 不是"乘上机房数之后一共几台",这个乘法没人在界面上看得见。
 	// 超了就按机房轮流截断(而不是砍掉末尾几个机房),让每个机房都还有机会。
-	if totalOrders > maxOrdersPerTrigger {
+	if totalOrders > limit {
 		m.state.Logger.Warn(fmt.Sprintf(
-			"[monitor->order] %s 本轮 %d 个机房 × 数量 %d = %d 单,超过单次触发上限 %d,已截断 —— "+
+			"[monitor->order] %s 本轮 %d 个机房 × 数量 %d = %d 单,超过本轮剩余下单额度 %d,已截断 —— "+
 				"如果确实想要这么多,把订阅拆成多条或调低 quantity",
-			planCode, len(targets), quantity, totalOrders, maxOrdersPerTrigger), "monitor")
-		totalOrders = maxOrdersPerTrigger
+			planCode, len(targets), quantity, totalOrders, limit), "monitor")
+		totalOrders = limit
 	}
 	m.state.Logger.Info(fmt.Sprintf("[monitor->order] 开始批量下单: %s, 配置数=1, 数据中心数=%d, 数量=%d, 总订单数=%d",
 		planCode, len(targets), quantity, totalOrders), "monitor")
@@ -358,4 +365,28 @@ func (m *Monitor) batchOrder(planCode string, configInfo map[string]interface{},
 
 	m.state.Logger.Info(fmt.Sprintf("[monitor->order] 批量下单完成: 成功=%d, 失败=%d, 总计=%d",
 		atomic.LoadInt64(&successCount), atomic.LoadInt64(&failCount), totalOrders), "monitor")
+	return int(atomic.LoadInt64(&successCount))
+}
+
+// orderBudget 一次检查(一条订阅的一整轮,跨它的全部配置)最多下几单。
+//
+// 以前封顶是在 batchOrder 里按**单次调用**截的,而 batchOrder 是按配置逐套调的 ——
+// 于是"一次补货最多 10 单"实际是"每套配置最多 10 单":盯全部配置的订阅,
+// 4 套配置 × 4 个机房同时上架就是 16 单,每单都单独通过月费闸。
+//
+// 程序自己建的订阅(新机型自动下单)再收紧到 quantity 台:用户开这个功能的意思是
+// "新机型出来给我抢一台",不是"每套内存/硬盘组合 × 每个机房各一台"。
+// 未付款订单也会锁机器,多出来的每一张都要用户自己去取消。
+func orderBudget(cfg subCheckConfig) int {
+	budget := maxOrdersPerTrigger
+	if cfg.AutoCreatedFrom != "" {
+		q := cfg.Quantity
+		if q < 1 {
+			q = 1
+		}
+		if q < budget {
+			budget = q
+		}
+	}
+	return budget
 }

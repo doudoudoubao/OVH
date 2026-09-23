@@ -120,6 +120,20 @@ func (db *DB) migrate() error {
 	if err := db.addColumnIfMissing("monitor_subscriptions", "options", "TEXT NOT NULL DEFAULT '[]'"); err != nil {
 		return err
 	}
+	// 月费上限(新机型自动下单的闸)。v0.5/v0.6 只加在了结构体上,表里一直没列、
+	// INSERT 也没带 —— 写入被静默丢弃,重启后自动建的订阅变成"自动下单 + 不限价",
+	// 队列里带上限的任务也一样。订阅和队列两边都要有,缺一边闸就漏在那一边。
+	for _, c := range [][3]string{
+		{"monitor_subscriptions", "max_monthly", "REAL NOT NULL DEFAULT 0"},
+		{"monitor_subscriptions", "max_monthly_currency", "TEXT NOT NULL DEFAULT ''"},
+		{"monitor_subscriptions", "auto_created_from", "TEXT NOT NULL DEFAULT ''"},
+		{"queue", "max_monthly", "REAL NOT NULL DEFAULT 0"},
+		{"queue", "max_monthly_currency", "TEXT NOT NULL DEFAULT ''"},
+	} {
+		if err := db.addColumnIfMissing(c[0], c[1], c[2]); err != nil {
+			return err
+		}
+	}
 	if err := db.addColumnIfMissing("vps_subscriptions", "auto_order_account_id", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return err
 	}

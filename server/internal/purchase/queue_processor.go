@@ -215,9 +215,6 @@ func ProcessQueueLoop(state *app.State) {
 
 		if len(ready) > 0 {
 			state.Logger.Debug("准备并发处理 N 个订单", "queue")
-			processedIDs := []string{}
-			var procMu sync.Mutex
-
 			processSingle := func(it types.QueueItem) {
 				if state.IsTaskDeleted(it.ID) {
 					return
@@ -272,18 +269,24 @@ func ProcessQueueLoop(state *app.State) {
 					return
 				}
 				if outcome.Success {
+					// 买到了就当场从队列里摘掉并落库,不能等到整批跑完。
+					//
+					// 以前这里只在内存里改成 completed,落库要等所有批次都跑完 ——
+					// 同批别的任务卡在 OVH 慢请求上时,这段窗口能有几分钟。
+					// 其间进程一重启(在线更新、docker 重建、崩溃),库里这条还是 running,
+					// 重启后会再下一单;开了自动付款就是重复扣款。
 					state.QueueMu.Lock()
-					for i := range state.Queue {
-						if state.Queue[i].ID == it.ID {
-							state.Queue[i].Status = "completed"
-							state.Queue[i].UpdatedAt = types.NowISO()
-							break
+					kept := make([]types.QueueItem, 0, len(state.Queue))
+					for _, q := range state.Queue {
+						if q.ID != it.ID {
+							kept = append(kept, q)
 						}
 					}
+					state.Queue = kept
 					state.QueueMu.Unlock()
-					procMu.Lock()
-					processedIDs = append(processedIDs, it.ID)
-					procMu.Unlock()
+					if err := state.SaveQueue(); err != nil {
+						state.Logger.Error("任务 "+it.ID+" 已下单成功,但从队列移除后落库失败(重启后可能重复下单,请到队列页手动删除): "+err.Error(), "queue")
+					}
 					if finalRetry == 1 {
 						state.Logger.Info("首次尝试购买成功: "+it.PlanCode, "queue")
 					} else {
@@ -385,24 +388,8 @@ func ProcessQueueLoop(state *app.State) {
 				state.Logger.Debug("批次完成", "queue")
 			}
 
-			// 从队列移除已完成
-			if len(processedIDs) > 0 {
-				procSet := map[string]struct{}{}
-				for _, id := range processedIDs {
-					procSet[id] = struct{}{}
-				}
-				state.QueueMu.Lock()
-				kept := state.Queue[:0]
-				for _, it := range state.Queue {
-					if _, ok := procSet[it.ID]; !ok {
-						kept = append(kept, it)
-					}
-				}
-				state.Queue = kept
-				state.QueueMu.Unlock()
-				state.Logger.Info("已从队列移除 N 个已完成的订单", "queue")
-			}
-
+			// 成功的单已经在 processSingle 里当场移除并落库了;
+			// 这里落的是本轮的检查时间 / 重试计数 / 失败状态
 			_ = state.SaveQueue()
 		}
 

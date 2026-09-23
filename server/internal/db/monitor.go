@@ -8,19 +8,22 @@ import (
 )
 
 type monitorSubRow struct {
-	PlanCode           string `db:"plan_code"`
-	DatacentersJSON    string `db:"datacenters"`
-	NotifyAvailable    int    `db:"notify_available"`
-	NotifyUnavailable  int    `db:"notify_unavailable"`
-	LastStatusJSON     string `db:"last_status"`
-	CreatedAt          string `db:"created_at"`
-	HistoryJSON        string `db:"history"`
-	ServerName         string `db:"server_name"`
-	AutoOrder          int    `db:"auto_order"`
-	Quantity           int    `db:"quantity"`
-	AutoOrderAccountID string `db:"auto_order_account_id"`
-	AutoPay            int    `db:"auto_pay"`
-	OptionsJSON        string `db:"options"`
+	PlanCode           string  `db:"plan_code"`
+	DatacentersJSON    string  `db:"datacenters"`
+	NotifyAvailable    int     `db:"notify_available"`
+	NotifyUnavailable  int     `db:"notify_unavailable"`
+	LastStatusJSON     string  `db:"last_status"`
+	CreatedAt          string  `db:"created_at"`
+	HistoryJSON        string  `db:"history"`
+	ServerName         string  `db:"server_name"`
+	AutoOrder          int     `db:"auto_order"`
+	Quantity           int     `db:"quantity"`
+	AutoOrderAccountID string  `db:"auto_order_account_id"`
+	AutoPay            int     `db:"auto_pay"`
+	OptionsJSON        string  `db:"options"`
+	MaxMonthly         float64 `db:"max_monthly"`
+	MaxMonthlyCurrency string  `db:"max_monthly_currency"`
+	AutoCreatedFrom    string  `db:"auto_created_from"`
 }
 
 func rowToMonitorSub(r monitorSubRow) types.Subscription {
@@ -49,6 +52,9 @@ func rowToMonitorSub(r monitorSubRow) types.Subscription {
 		AutoOrderAccountID: r.AutoOrderAccountID,
 		AutoPay:            r.AutoPay == 1,
 		Options:            opts,
+		MaxMonthly:         r.MaxMonthly,
+		MaxMonthlyCurrency: r.MaxMonthlyCurrency,
+		AutoCreatedFrom:    r.AutoCreatedFrom,
 	}
 }
 
@@ -101,6 +107,9 @@ func monitorSubToRow(s types.Subscription) (monitorSubRow, error) {
 		AutoOrderAccountID: s.AutoOrderAccountID,
 		AutoPay:            bi(s.AutoPay),
 		OptionsJSON:        string(optsJSON),
+		MaxMonthly:         s.MaxMonthly,
+		MaxMonthlyCurrency: s.MaxMonthlyCurrency,
+		AutoCreatedFrom:    s.AutoCreatedFrom,
 	}, nil
 }
 
@@ -129,10 +138,12 @@ func (db *DB) UpsertMonitorSubscription(s types.Subscription) error {
 	_, err = db.NamedExec(`
 		INSERT INTO monitor_subscriptions
 		(plan_code, datacenters, notify_available, notify_unavailable, last_status,
-		 created_at, history, server_name, auto_order, quantity, auto_order_account_id, auto_pay, options)
+		 created_at, history, server_name, auto_order, quantity, auto_order_account_id, auto_pay, options,
+		 max_monthly, max_monthly_currency, auto_created_from)
 		VALUES
 		(:plan_code, :datacenters, :notify_available, :notify_unavailable, :last_status,
-		 :created_at, :history, :server_name, :auto_order, :quantity, :auto_order_account_id, :auto_pay, :options)
+		 :created_at, :history, :server_name, :auto_order, :quantity, :auto_order_account_id, :auto_pay, :options,
+		 :max_monthly, :max_monthly_currency, :auto_created_from)
 		ON CONFLICT(plan_code) DO UPDATE SET
 		  datacenters        = excluded.datacenters,
 		  notify_available   = excluded.notify_available,
@@ -144,7 +155,10 @@ func (db *DB) UpsertMonitorSubscription(s types.Subscription) error {
 		  quantity               = excluded.quantity,
 		  auto_order_account_id  = excluded.auto_order_account_id,
 		  auto_pay               = excluded.auto_pay,
-		  options                = excluded.options
+		  options                = excluded.options,
+		  max_monthly            = excluded.max_monthly,
+		  max_monthly_currency   = excluded.max_monthly_currency,
+		  auto_created_from      = excluded.auto_created_from
 	`, r)
 	if err != nil {
 		return fmt.Errorf("upsert monitor sub %s: %w", s.PlanCode, err)
@@ -170,10 +184,12 @@ func (db *DB) ReplaceMonitorSubscriptions(subs []types.Subscription) error {
 		_, err = tx.NamedExec(`
 			INSERT INTO monitor_subscriptions
 			(plan_code, datacenters, notify_available, notify_unavailable, last_status,
-			 created_at, history, server_name, auto_order, quantity, auto_order_account_id, auto_pay, options)
+			 created_at, history, server_name, auto_order, quantity, auto_order_account_id, auto_pay, options,
+			 max_monthly, max_monthly_currency, auto_created_from)
 			VALUES
 			(:plan_code, :datacenters, :notify_available, :notify_unavailable, :last_status,
-			 :created_at, :history, :server_name, :auto_order, :quantity, :auto_order_account_id, :auto_pay, :options)
+			 :created_at, :history, :server_name, :auto_order, :quantity, :auto_order_account_id, :auto_pay, :options,
+			 :max_monthly, :max_monthly_currency, :auto_created_from)
 		`, r)
 		if err != nil {
 			return fmt.Errorf("insert monitor sub %s: %w", s.PlanCode, err)

@@ -103,3 +103,35 @@ func TestDBShapeHasCapFields(t *testing.T) {
 		}
 	}
 }
+
+// 上面那条只测了两个结构体之间的转换,**没经过数据库** —— 当时表里根本没有上限的列,
+// 它照样是绿的,而真实重启后自动建的订阅已经变成"自动下单 + 不限价"。
+// 这条走真 SQLite:建订阅 → SaveToDB → 新的 Monitor 从同一个库 LoadFromDB。
+// LoadFromDB 不只在启动时跑,代理看门狗跳闸时也会整表重载,所以这里等于两条路一起盯。
+func TestMonthlyCapSurvivesRestartThroughSQLite(t *testing.T) {
+	m := newPlanTestMonitor(t, []types.OVHAccount{{
+		ID: "acc-1", Name: "主号", Endpoint: "ovh-eu", Zone: "IE", IsDefault: true,
+	}})
+	acc, _ := m.state.FindAccount("acc-1")
+	if !m.subscribeNewPlan(armedConfig(), plan("25new01", 9, true, "EUR"), acc) {
+		t.Fatal("没建出订阅")
+	}
+	m.SaveToDB()
+
+	restarted := New(m.state)
+	restarted.LoadFromDB()
+	subs := restarted.Snapshot()
+	if len(subs) != 1 {
+		t.Fatalf("重启后应有 1 条订阅,实际 %d", len(subs))
+	}
+	s := subs[0]
+	if !s.AutoOrder {
+		t.Fatal("前提不成立:重启后自动下单应当还开着")
+	}
+	if s.MaxMonthly != 15 || s.MaxMonthlyCurrency != "EUR" {
+		t.Errorf("重启后月费上限变成 %v %q —— 这条订阅成了不限价自动下单", s.MaxMonthly, s.MaxMonthlyCurrency)
+	}
+	if s.AutoCreatedFrom != "new-plan-watch" {
+		t.Errorf("重启后订阅来历丢了: %q", s.AutoCreatedFrom)
+	}
+}
