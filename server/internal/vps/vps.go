@@ -389,8 +389,9 @@ var statusMap = map[string]string{
 // 必须带上子公司:同一个 planCode 在 EU / US / CA 三个站点是三份互不相干的库存,
 // 不写子公司的话,同时监控 IE 和 US 的用户收到的两条通知长得一模一样,分不清该去哪买。
 func SendSummaryNotification(state *app.State, planCode, ovhSubsidiary string, dcs []map[string]interface{}, changeType string) bool {
-	cfg := state.Config.Get()
-	if cfg.TgToken == "" || cfg.TgChatID == "" || len(dcs) == 0 {
+	// 不再要求必须配 Telegram:下面走的是 notify.Broadcast,Webhook 也能收。
+	// 以前这里挡在前面,只配 Webhook 的用户 VPS 监控照跑、补货却一条通知都没有。
+	if len(dcs) == 0 {
 		return false
 	}
 	planDisplay := vpsPlanDisplay(planCode)

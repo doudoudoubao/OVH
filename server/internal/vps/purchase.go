@@ -349,10 +349,10 @@ func autoOrderOnRestock(state *app.State, sub types.VPSSubscription, dcs []map[s
 			// 同独服:checkout 是 autoPayWithPreferredPaymentMethod:false,
 			// "成功"= 订单已创建、未付款、逾期作废。通知里必须说清楚。
 			payNote := "⚠️ 订单尚未付款：请尽快打开订单链接完成付款,逾期未付订单会自动作废。\n" +
-				"(下单时已按惯例放弃 14 天撤销期,付款即开通)"
+				"(未放弃 14 天无理由撤销权,付款后仍可在撤销期内申请撤单)"
 			if sub.AutoPay {
 				payNote = "💳 已请求用账户默认支付方式自动付款,请打开订单链接核对扣款是否成功。\n" +
-					"(下单时已按惯例放弃 14 天撤销期)"
+					"(未放弃 14 天无理由撤销权)"
 			}
 			// 同独服:通知里发需要登录的控制面板深链,不发 checkout 那个带凭证的 url。
 			// 带凭证那份存在本地历史里,界面上照样一键可付。

@@ -569,14 +569,13 @@ func PurchaseServer(ctx context.Context, state *app.State, item *types.QueueItem
 	state.Logger.Info(fmt.Sprintf("成功购买 %s 在 %s (订单ID: %s, URL: %s)",
 		item.PlanCode, item.Datacenter, orderID, orderURL), "purchase")
 
-	// 发送 Telegram 成功通知。TG token / chat id 仍然走全局 state.Config(Telegram 是平台级配置,跨账户共享)
-	tgCfg := state.Config.Get()
-	if tgCfg.TgToken != "" && tgCfg.TgChatID != "" {
-		msg := BuildOrderSuccessMessage(item, orderID, ovh.ManagerOrderURL(acc.Endpoint, orderID))
-		notify.Broadcast(state, msg, nil)
-		state.Logger.Info("已为订单 "+orderID+" 发送 Telegram 成功通知。", "purchase")
-	} else {
-		state.Logger.Info("未配置 Telegram Token 或 Chat ID，跳过成功通知发送。", "purchase")
+	// 成功通知走所有已配置的通道(Telegram / Webhook)。
+	// 以前这里先判"配了 Telegram 才发",而 Broadcast 本身就会发 Webhook ——
+	// 只用 Webhook 的用户于是永远收不到这条"下单成功,请尽快付款"。
+	// 未付款订单逾期作废,漏掉这一条等于可能丢机器。
+	msg := BuildOrderSuccessMessage(item, orderID, ovh.ManagerOrderURL(acc.Endpoint, orderID))
+	if notify.Broadcast(state, msg, nil) > 0 {
+		state.Logger.Info("已为订单 "+orderID+" 发送成功通知。", "purchase")
 	}
 	return Outcome{Success: true}
 }
@@ -1061,13 +1060,15 @@ func backfillOrderDetail(state *app.State, client *ovhsdk.Client, taskID, orderI
 // 但订单是**未付款**的,逾期会自动作废。不把这句写出来,
 // 用户看到 🎉 就睡了,第二天机器没了还以为是我们没抢到。
 func BuildOrderSuccessMessage(item *types.QueueItem, orderID, managerURL string) string {
+	// 撤销期那一句必须和 checkout 的真实行为一致:现在**不再**发 waiveRetractationPeriod,
+	// 14 天无理由撤单的权利还在。以前写的是"已按惯例放弃",会让用户以为退不了。
 	payNote := "⚠️ 订单尚未付款：请尽快打开订单链接完成付款,逾期未付订单会自动作废。\n" +
-		"(下单时已按惯例放弃 14 天撤销期,付款即开通)\n"
+		"(未放弃 14 天无理由撤销权,付款后仍可在撤销期内申请撤单)\n"
 	if item.AutoPay {
 		// 只承诺我们真正知道的:已请求自动付款 ≠ 扣款一定成功
 		// (默认支付方式失效/余额不足时 OVH 不会扣成),让用户去核对
 		payNote = "💳 已请求用账户默认支付方式自动付款,请打开订单链接核对扣款是否成功。\n" +
-			"(下单时已按惯例放弃 14 天撤销期)\n"
+			"(未放弃 14 天无理由撤销权)\n"
 	}
 	// 发控制面板深链,不发 checkout 返回的那个 url ——
 	// 后者是带凭证的下载链接(OVH 的 billing.Order 里 url 旁边就是 password),
