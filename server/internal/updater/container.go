@@ -49,8 +49,8 @@ const ContainerUpdateHint = "检测到运行在容器里，自更新已停用。
 	"容器的更新方式是拉新镜像再重建容器：\n" +
 	"  docker compose pull && docker compose up -d\n" +
 	"或者：\n" +
-	"  docker pull ghcr.io/gokele/ovh:latest\n" +
-	"  docker rm -f ovh-console && docker run -d ... ghcr.io/gokele/ovh:latest\n\n" +
+	"  docker pull ghcr.io/doudoudoubao/ovh:latest\n" +
+	"  docker rm -f ovh-console && docker run -d ... ghcr.io/doudoudoubao/ovh:latest\n\n" +
 	"数据在挂载的卷上，重建容器不会丢。\n\n" +
 	"为什么不能在容器里自更新：新二进制只会写进容器的可写层，" +
 	"容器一重建就回到镜像里的旧版本 —— 你会看到「更新成功」之后版本号又变回去。"
