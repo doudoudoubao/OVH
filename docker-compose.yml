@@ -13,7 +13,7 @@
 
 services:
   ovh-console:
-    image: ghcr.io/gokele/ovh:latest
+    image: ghcr.io/doudoudoubao/ovh:latest
     container_name: ovh-console
     restart: unless-stopped
 
