@@ -141,7 +141,7 @@ export function SidebarContent({ onItemClick }: { onItemClick?: () => void }) {
       {/* Footer:项目仓库入口 + 署名 */}
       <div className="px-3 h-10 flex items-center justify-between gap-2 border-t border-border flex-shrink-0">
         <a
-          href="https://github.com/gokele/ovh"
+          href="https://github.com/doudoudoubao/OVH"
           target="_blank"
           rel="noreferrer noopener"
           className="inline-flex items-center gap-1.5 px-1.5 py-1 rounded text-[11px] text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
